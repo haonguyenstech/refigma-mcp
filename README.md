@@ -3,7 +3,7 @@
 Read Figma frames from an AI agent **without the REST API, plugins, or a paid seat**. Works on
 View/Collab seats, which are otherwise limited to ~20 REST reads per month and can't run plugins.
 
-How: a logged-in debug Edge (CDP `:9222`) opens the link, Figma's own copy handler is triggered on the
+How: a private **headless** Edge (no window, no Figma Desktop; `lib/browser.mjs`, CDP `:9334`) opens the link, Figma's own copy handler is triggered on the
 selected node, and the clipboard payload (`fig-kiwi` binary) is decoded locally into a layout tree.
 
 ## Tools
@@ -27,8 +27,10 @@ Measured on the test frame: generated HTML **and** React+Tailwind both match Fig
 
 ## How a capture works
 
-`lib/capture.mjs` drives the debug Edge over one CDP session:
-- blocks FigmaAgent (`127.0.0.1:44950`), so Figma Desktop never pops up and the web editor opens directly;
+`lib/capture.mjs` drives the headless Edge over one CDP session (`REFIGMA_CDP=9222` to watch it in the visible debug Edge):
+- blocks FigmaAgent (`127.0.0.1:44950`), so Figma Desktop never pops up, and closes the resulting
+  "Need to use the desktop app or installed fonts?" dialog (it steals focus from the Copy-as-PNG shortcut);
+- the headless browser uses a normal Edge user agent (Figma's CDN rejects `HeadlessChrome`) and no automation flag;
 - auto-attaches workers and records the multiplayer WebSocket: a `fig-wire` schema frame + `NODE_CHANGES`
   holding the entire loaded page (≈150k nodes incl. all components, variables, vector blobs) → `lib/doc.mjs`;
 - triggers Figma's own copy handler (`execCommand('copy')` on `input.focus-target`) for the node and Copy-as-PNG.
@@ -50,8 +52,8 @@ npm install
 claude mcp add -s user refigma-mcp -- node ~/coding/js/refigma-mcp/server.mjs
 ```
 
-The debug Edge must be logged in to figma.com once (import cookies from the real Edge with the
-`import-cookie` skill, or log in by hand in the window `connect.sh` opens). CLI: `bin/figma-read <url> [outdir]`.
+The headless browser takes the figma.com session from the debug Edge if it is running, else from the real
+Microsoft Edge profile (one Keychain prompt). `figma_relogin` refreshes it from the real Edge. CLI: `bin/figma-read <url> [outdir]`.
 
 ## Caveats
 

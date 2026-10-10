@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # figma-read <figma design URL with node-id> [outdir]
-# Opens the link in the logged-in debug Edge (CDP :9222) with FigmaAgent blocked (no Figma Desktop pop-up),
+# Opens the link in refigma's headless Edge (no window; FigmaAgent blocked so Figma Desktop never opens),
 # records the page document, copies the node, decodes Figma's clipboard binary locally and writes
 # tree.txt, index.html, <Component>.tsx, assets/, tokens.json (+ frame.png). No REST API, no quota.
 set -euo pipefail
@@ -9,7 +9,6 @@ NODE=$(python3 -c "import sys,urllib.parse as u;q=u.parse_qs(u.urlparse(sys.argv
 FILE=$(python3 -c "import sys,re;print(re.search(r'/(?:design|file|proto)/([A-Za-z0-9]+)',sys.argv[1]).group(1))" "$URL")
 FDIR="$HOME/.figma-local/out/$FILE"
 OUT="${2:-$FDIR/${NODE//:/-}}"; mkdir -p "$OUT"
-curl -s -m2 http://127.0.0.1:9222/json/version >/dev/null || bash ~/.claude/skills/agent-browser-connect/connect.sh >/dev/null
 node "$D/lib/capture.mjs" "$URL" "$FDIR/_doc/_new" "$OUT"
 node "$D/lib/doc.mjs" ingest "$FDIR" >/dev/null || echo "warning: document ingest failed" >&2
 (cd "$D" && node lib/decode.mjs "$OUT/clip.html" "$OUT/msg.json" >/dev/null)

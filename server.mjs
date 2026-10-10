@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// refigma-mcp: read Figma design files through the logged-in debug Edge (CDP :9222) — no REST quota, no plugin,
+// refigma-mcp: read Figma design files through a private headless Edge (no window, no Figma Desktop) — no REST quota, no plugin,
 // works on View seats. A capture records the page document (multiplayer stream) and copies the node; everything
 // is decoded locally into tree.txt, index.html, <Component>.tsx, assets/, tokens.json (+ Figma's PNG).
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -216,13 +216,13 @@ server.registerTool('figma_get_tokens', {
 
 server.registerTool('figma_get_image', {
   title: "Figma's own render of a node",
-  description: "Figma's 1x PNG of the node (\"Copy as PNG\"; needs the debug Edge window visible during capture). It is the ground truth figma_compare diffs against. For other scales/formats use figma_export.",
+  description: "Figma's 1x PNG of the node (\"Copy as PNG\"). It is the ground truth figma_compare diffs against. For other scales/formats use figma_export.",
   inputSchema: { url: URL_ARG, node_id: NODE_ARG, refresh: REFRESH },
 }, async ({ url, node_id, refresh }) => {
   try {
     const r = await capture(url, refresh, { node: node_id });
     const png = path.join(r.dir, 'frame.png');
-    if (!fs.existsSync(png)) return fail(new Error('Figma PNG not captured (debug Edge window hidden, or node extracted from the document). Retry with refresh=true while the window is visible, or use figma_export.'));
+    if (!fs.existsSync(png)) return fail(new Error('Figma PNG not captured (node was extracted from the page document). Retry with refresh=true, or use figma_export.'));
     return { content: [{ type: 'image', data: fs.readFileSync(png).toString('base64'), mimeType: 'image/png' }, { type: 'text', text: png }] };
   } catch (e) { return fail(e); }
 });
@@ -235,7 +235,7 @@ server.registerTool('figma_compare', {
   try {
     const r = await capture(url, refresh, { node: node_id });
     const png = path.join(r.dir, 'frame.png');
-    if (!fs.existsSync(png)) return fail(new Error('No Figma PNG to compare against; run figma_get_image with refresh=true while the debug Edge window is visible'));
+    if (!fs.existsSync(png)) return fail(new Error('No Figma PNG to compare against; run figma_get_image with refresh=true'));
     const { w, h } = JSON.parse(read(r, 'extract.json'));
     let file = target || path.join(r.dir, 'index.html');
     const env = { ...ENV };
@@ -256,19 +256,16 @@ server.registerTool('figma_compare', {
 });
 
 server.registerTool('figma_relogin', {
-  title: 'Refresh the figma.com session of the debug browser',
-  description: "Copies the figma.com cookies from the user's real Microsoft Edge profile into the debug Edge and verifies the session. macOS may show a Keychain prompt (\"Microsoft Edge Safe Storage\") that the user must Allow. Use when a capture reports NOT_LOGGED_IN / editor did not load.",
+  title: 'Refresh the figma.com session',
+  description: "Copies the figma.com cookies from the user's real Microsoft Edge profile into refigma's headless browser and verifies the session. macOS may show a Keychain prompt (\"Microsoft Edge Safe Storage\") that the user must Allow. Use when a capture reports NOT_LOGGED_IN / editor did not load.",
   inputSchema: {},
 }, async () => {
-  try {
-    await run('bash', ['-c', 'curl -s -m2 http://127.0.0.1:9222/json/version >/dev/null || bash ~/.claude/skills/agent-browser-connect/connect.sh >/dev/null']);
-    return text(await run('node', [LIB('login.mjs')], 120_000));
-  } catch (e) { return fail(e); }
+  try { return text(await run('node', [LIB('browser.mjs'), 'relogin'], 120_000)); } catch (e) { return fail(e); }
 });
 
 server.registerTool('figma_status', {
   title: 'Check refigma prerequisites',
-  description: 'Debug Edge on CDP :9222, recorded documents and cached captures.',
+  description: 'Headless browser state, recorded documents and cached captures.',
   inputSchema: {},
 }, async () => {
   const files = fs.existsSync(CACHE) ? fs.readdirSync(CACHE) : [];
@@ -276,8 +273,8 @@ server.registerTool('figma_status', {
     const nodes = fs.readdirSync(path.join(CACHE, f)).filter(n => /^\d+-\d+$/.test(n)).map(n => n.replace('-', ':'));
     return `${f}: document ${hasDoc(path.join(CACHE, f)) ? 'recorded' : 'no'}, captured nodes: ${nodes.join(', ') || 'none'}`;
   });
-  let browser = 'debug Edge not running on :9222 (launched automatically on the next capture)';
-  try { const v = await (await fetch('http://127.0.0.1:9222/json/version')).json(); browser = `debug browser: ${v.Browser}`; } catch {}
+  let browser = 'headless browser not running (starts automatically on the next capture)';
+  try { const v = await (await fetch('http://127.0.0.1:9334/json/version')).json(); browser = `headless browser: ${v.Browser} on :9334`; } catch {}
   return text(`${browser}\n${lines.join('\n') || 'no captures yet'}\nIf captures fail with NOT_LOGGED_IN, run figma_relogin.`);
 });
 
