@@ -3,7 +3,7 @@ tree.txt, index.html (+ inline CSS), SVG icons, downloaded images and tokens.
 
 usage: extract.py <msg.json> <root node id> <out dir>
 """
-import base64, copy, hashlib, html, json, math, os, re, struct, sys, urllib.request
+import base64, copy, hashlib, html, json, math, os, re, shutil, struct, subprocess, sys, time, urllib.request
 
 MSG, ROOT, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 msg = json.load(open(MSG))
@@ -16,6 +16,38 @@ for n in N:
     p = n.get('parentIndex')
     if p: kids.setdefault(g(p['guid']), []).append(n)
 for v in kids.values(): v.sort(key=lambda c: c['parentIndex']['position'])
+
+# ---------------------------------------------------------------- styles
+# A node keeps whatever paint/effect/typography it had when a style was applied; the style node holds the current
+# values (library shadow styles, image fill styles, text styles). Figma's copy handler inlines them for plain nodes
+# but not inside instance overrides, and the page document never does: resolve every reference to the style itself.
+STYLE_PROPS = {'styleIdForFill': ['fillPaints'], 'styleIdForStrokeFill': ['strokePaints'], 'styleIdForEffect': ['effects'],
+               'styleIdForText': ['fontName', 'fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'paragraphIndent',
+                                  'textCase', 'textDecoration', 'fontVariations', 'fontVariantCommonLigatures',
+                                  'fontVariantContextualLigatures', 'textTracking', 'leadingTrim', 'fontVersion']}
+STYLES_BY_KEY = {}
+for n in N:
+    if n.get('styleType') and n.get('key'): STYLES_BY_KEY.setdefault(n['key'], []).append(n)
+
+def style_node(ref):
+    if not ref: return None
+    if 'guid' in ref:
+        n = byid.get(g(ref['guid'])); return n if n and n.get('styleType') else None
+    cands = STYLES_BY_KEY.get((ref.get('assetRef') or {}).get('key'))
+    if not cands: return None
+    return next((c for c in cands if c.get('version') == ref['assetRef'].get('version')), cands[-1])
+
+def resolve_styles(o):
+    for ref, props in STYLE_PROPS.items():
+        st = style_node(o.get(ref))
+        if st:
+            for p in props:
+                if p in st: o[p] = copy.deepcopy(st[p])
+
+for n in N:
+    if n.get('styleType'): continue
+    resolve_styles(n)
+    for e in (n.get('symbolData') or {}).get('symbolOverrides') or []: resolve_styles(e)
 
 # ---------------------------------------------------------------- variables / tokens
 VARS = {}           # key or guid -> VARIABLE node
@@ -978,22 +1010,39 @@ mark_icons(M)
 
 missing = []
 urls = META.get('imageHashes', {})
+# Images are content-addressed (hash): keep one copy per file so other frames of the file reuse it without a download.
+SHARED = os.path.join(os.path.expanduser('~/.figma-local/out'), META['fileKey'], '_images') if META.get('fileKey') else None
+todo = []
 for hsh in sorted(IMAGES):
     dst = f'{OUT}/assets/images/{hsh}.png'
     if os.path.exists(dst): continue
+    if SHARED and os.path.exists(f'{SHARED}/{hsh}.png'):
+        shutil.copyfile(f'{SHARED}/{hsh}.png', dst); continue
     if hsh not in urls and not urls.get('__api_done'):
         # Fallback: REST "image fills" is Tier 2 (per-minute quota even on View seats), unlike GET file (Tier 1).
         urls['__api_done'] = True
         tok = os.environ.get('FIGMA_API_KEY') or os.environ.get('FIGMA_ACCESS_TOKEN')
-        if tok and META.get('fileKey'):
+        # The response maps every image of the file (MBs, ~8s): cache it per file; its signed URLs last for days.
+        api_cache = f'{SHARED}/image-fills.json' if SHARED else None
+        if api_cache and os.path.exists(api_cache) and time.time() - os.path.getmtime(api_cache) < 12 * 3600:
+            urls.update(json.load(open(api_cache)))
+        elif tok and META.get('fileKey'):
             try:
                 req = urllib.request.Request(f"https://api.figma.com/v1/files/{META['fileKey']}/images", headers={'X-Figma-Token': tok})
-                urls.update(json.load(urllib.request.urlopen(req, timeout=30)).get('meta', {}).get('images', {}))
+                fills = json.load(urllib.request.urlopen(req, timeout=30)).get('meta', {}).get('images', {})
+                urls.update(fills)
+                if api_cache: os.makedirs(SHARED, exist_ok=True); json.dump(fills, open(api_cache, 'w'))
             except Exception as e: missing.append(f'image-fills API: {e}')
-    if hsh in urls:
-        try: urllib.request.urlretrieve(urls[hsh], dst)
-        except Exception as e: missing.append(f'{hsh}: {e}')
+    if hsh in urls: todo.append((hsh, dst))
     else: missing.append(hsh)
+
+# curl --parallel: one process, connections reused; Python's urllib pays ~1-6s of TLS setup per image here
+if todo:
+    cfg = ''.join(f'url = "{urls[h]}"\noutput = "{d}"\n' for h, d in todo)
+    subprocess.run(['curl', '-sSfL', '--parallel', '--parallel-max', '8', '--retry', '2', '--max-time', '60', '-K', '-'], input=cfg, text=True, capture_output=True)
+    for hsh, dst in todo:
+        if not os.path.exists(dst): missing.append(f'{hsh}: download failed')
+        elif SHARED: os.makedirs(SHARED, exist_ok=True); shutil.copyfile(dst, f'{SHARED}/{hsh}.png')
 
 tokens = {name: {'type': v.get('variableResolvedType'), 'css': css_var(name), 'values': var_value(v)} for name, v in sorted(USED_TOKENS.items())}
 json.dump(tokens, open(f'{OUT}/tokens.json', 'w'), indent=1, ensure_ascii=False)

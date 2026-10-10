@@ -15,7 +15,11 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const LIB = f => path.join(ROOT, 'lib', f);
 const READER = path.join(ROOT, 'bin', 'figma-read');
 const CACHE = path.join(os.homedir(), '.figma-local', 'out');
-const ENV = { ...process.env, PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin` };
+// A bigger young generation roughly halves decoding time of a page snapshot (150k nodes) — GC dominated otherwise.
+const ENV = { ...process.env, PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+  NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-semi-space-size=64`.trim(),
+  // node data comes from a recorded page document only while it is recent; older ones fall back to a live capture
+  REFIGMA_DOC_MAX_AGE: process.env.REFIGMA_DOC_MAX_AGE || '1800' };
 
 function parseUrl(url, nodeOverride) {
   const u = new URL(url);
@@ -41,19 +45,41 @@ async function extractFromMsg(t) {
   fs.writeFileSync(path.join(t.dir, 'extract.json'), await run('python3', [LIB('extract.py'), path.join(t.dir, 'msg.json'), t.node, t.dir]));
 }
 
-// Full capture of the node (clipboard data + Figma PNG). `fast` uses the recorded page document instead when possible.
+// Data for a node, fastest source first. Both give the same code (byte-identical HTML/tree on the test frames):
+//   1. the page document recorded by a recent capture (no browser, ~3-5s) — only if it is younger than
+//      REFIGMA_DOC_MAX_AGE and every image of the node resolved; otherwise
+//   2. a live editor capture: Figma's copy data + its PNG (~25-35s; the only source of frame.png, so `png` forces it).
+// REFIGMA_PROTO=1 adds the prototype viewer between them (just the frame, ~10-25s; experimental: images the browser
+// already cached are not seen, and those nodes fall back to 2). REFIGMA_SOURCE=clipboard always uses 2.
+const fromDoc = async (t, args) => {
+  await run('node', [LIB('doc.mjs'), ...args]);
+  await extractFromMsg(t);
+  const missing = JSON.parse(read(t, 'extract.json')).images_missing || [];
+  if (missing.length) throw new Error(`images not resolved: ${missing.join(', ')}`);
+};
 const capture = (url, refresh, opts = {}) => serial(async () => {
   const t = parseUrl(url, opts.node);
   if (!t.node) throw new Error('This tool needs a node: pass a link with ?node-id= (right-click a frame → Copy link to selection) or node_id');
-  if (!refresh && has(t.dir, 'index.html') && has(t.dir, 'extract.json')) return { ...t, cached: true };
-  if (!refresh && has(t.dir, 'msg.json')) { await extractFromMsg(t); return { ...t, cached: true }; }
-  if (opts.fast && hasDoc(t.fdir)) {
-    try {
-      fs.mkdirSync(t.dir, { recursive: true });
-      await run('node', [LIB('doc.mjs'), 'extract', t.fdir, t.node, path.join(t.dir, 'msg.json'), t.file]);
-      await extractFromMsg(t);
-      return { ...t, cached: false, source: 'document' };
-    } catch { /* not on a recorded page: fall through to a live capture */ }
+  const pngOk = !opts.png || has(t.dir, 'frame.png');
+  if (!refresh && pngOk && has(t.dir, 'index.html') && has(t.dir, 'extract.json')) return { ...t, cached: true };
+  if (!refresh && pngOk && has(t.dir, 'msg.json')) { await extractFromMsg(t); return { ...t, cached: true }; }
+  if (!opts.png && process.env.REFIGMA_SOURCE !== 'clipboard') {
+    fs.mkdirSync(t.dir, { recursive: true });
+    const msg = path.join(t.dir, 'msg.json');
+    if (!refresh && hasDoc(t.fdir)) {
+      try { await fromDoc(t, ['extract', t.fdir, t.node, msg, t.file]); return { ...t, cached: false, source: 'document' }; }
+      catch { /* not on a recent recorded page, or an image without URL */ }
+    }
+    if (process.env.REFIGMA_PROTO === '1') {
+      try {
+        const pdir = path.join(t.fdir, '_proto', t.node.replace(':', '-'));
+        fs.rmSync(pdir, { recursive: true, force: true });
+        await run('node', [LIB('capture.mjs'), `https://www.figma.com/proto/${t.file}/x?node-id=${t.node.replace(':', '-')}`, pdir], 90_000);
+        await fromDoc(t, ['extract-dir', pdir, t.node, msg, t.file]);
+        return { ...t, cached: false, source: 'prototype' };
+      } catch (e) { if (/NOT_LOGGED_IN/.test(e.message)) throw e; }
+    }
+    for (const f of ['msg.json', 'extract.json', 'index.html']) fs.rmSync(path.join(t.dir, f), { force: true });
   }
   await run(READER, [t.nodeUrl, t.dir]);
   return { ...t, cached: false, source: 'clipboard' };
@@ -122,10 +148,30 @@ server.registerTool('figma_get_nodes', {
   inputSchema: { url: URL_ARG, node_ids: z.array(z.string()).min(1), max_lines_each: z.number().int().positive().optional() },
 }, async ({ url, node_ids, max_lines_each = 400 }) => {
   try {
+    const ids = [...new Set(node_ids.map(id => id.replace('-', ':')))];
+    const errors = {}, source = {};
+    // Nodes on a recorded page: decode the page once for all of them, then build their outputs in parallel.
+    await serial(async () => {
+      const t = parseUrl(url);
+      const todo = ids.filter(id => { const d = parseUrl(url, id).dir; return !(has(d, 'tree.txt') && has(d, 'extract.json')) && !has(d, 'msg.json'); });
+      if (!todo.length || !hasDoc(t.fdir)) return;
+      const res = JSON.parse(await run('node', [LIB('doc.mjs'), 'extract-many', t.fdir, t.file, ...todo.map(id => `${id}=${path.join(parseUrl(url, id).dir, 'msg.json')}`)]));
+      const ok = todo.filter(id => !res[id]?.error);
+      await Promise.all(ok.map(async id => {
+        const r = parseUrl(url, id);
+        try {
+          await extractFromMsg(r);
+          // an image without a URL: leave the node to capture(), which falls back to a live capture
+          if ((JSON.parse(read(r, 'extract.json')).images_missing || []).length) for (const f of ['msg.json', 'extract.json', 'index.html']) fs.rmSync(path.join(r.dir, f), { force: true });
+          else source[id] = 'document';
+        } catch (e) { errors[id] = e.message; }
+      }));
+    });
     const parts = [];
-    for (const id of node_ids) {
+    for (const id of ids) {
       try {
-        const r = await capture(url, false, { node: id, fast: true });
+        if (errors[id]) throw new Error(errors[id]);
+        const r = source[id] ? { ...parseUrl(url, id), source: source[id] } : await capture(url, false, { node: id });
         const lines = read(r, 'tree.txt').split('\n');
         parts.push(`### node ${r.node} (${r.cached ? 'cached' : r.source})\n` + lines.slice(0, max_lines_each).join('\n') + (lines.length > max_lines_each ? `\n… truncated (${lines.length} lines)` : ''));
       } catch (e) { parts.push(`### node ${id}\nERROR: ${e.message}`); }
@@ -176,9 +222,9 @@ server.registerTool('figma_export', {
   try {
     const t = parseUrl(url);
     // export from the frame capture that contains the node; fall back to capturing the node itself
-    let r = t.node && has(t.dir || '', 'index.html') ? { ...t } : await capture(url, false, { node: node_id, fast: true });
+    let r = t.node && has(t.dir || '', 'index.html') ? { ...t } : await capture(url, false, { node: node_id });
     const id = (node_id || r.node).replace('-', ':');
-    if (!fs.readFileSync(path.join(r.dir, 'index.html'), 'utf8').includes(`data-id="${id}"`)) r = await capture(url, false, { node: id, fast: true });
+    if (!fs.readFileSync(path.join(r.dir, 'index.html'), 'utf8').includes(`data-id="${id}"`)) r = await capture(url, false, { node: id });
     const out = dest || path.join(r.dir, 'exports', `${id.replace(':', '-')}@${scale}x.${format}`);
     const res = JSON.parse(await run('node', [LIB('export.mjs'), r.dir, id === r.node ? 'root' : id, format, String(scale), out], 180_000));
     const content = [{ type: 'text', text: `${res.out} (${res.width}x${res.height}, ${format} @${scale}x)` }];
@@ -220,9 +266,9 @@ server.registerTool('figma_get_image', {
   inputSchema: { url: URL_ARG, node_id: NODE_ARG, refresh: REFRESH },
 }, async ({ url, node_id, refresh }) => {
   try {
-    const r = await capture(url, refresh, { node: node_id });
+    const r = await capture(url, refresh, { node: node_id, png: true });
     const png = path.join(r.dir, 'frame.png');
-    if (!fs.existsSync(png)) return fail(new Error('Figma PNG not captured (node was extracted from the page document). Retry with refresh=true, or use figma_export.'));
+    if (!fs.existsSync(png)) return fail(new Error('Figma PNG not captured. Retry with refresh=true, or use figma_export.'));
     return { content: [{ type: 'image', data: fs.readFileSync(png).toString('base64'), mimeType: 'image/png' }, { type: 'text', text: png }] };
   } catch (e) { return fail(e); }
 });
@@ -233,7 +279,7 @@ server.registerTool('figma_compare', {
   inputSchema: { url: URL_ARG, node_id: NODE_ARG, target: z.string().optional(), refresh: REFRESH },
 }, async ({ url, node_id, target, refresh }) => {
   try {
-    const r = await capture(url, refresh, { node: node_id });
+    const r = await capture(url, refresh, { node: node_id, png: true });
     const png = path.join(r.dir, 'frame.png');
     if (!fs.existsSync(png)) return fail(new Error('No Figma PNG to compare against; run figma_get_image with refresh=true'));
     const { w, h } = JSON.parse(read(r, 'extract.json'));

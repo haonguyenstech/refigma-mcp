@@ -35,6 +35,24 @@ Measured on the test frame: generated HTML **and** React+Tailwind both match Fig
   holding the entire loaded page (≈150k nodes incl. all components, variables, vector blobs) → `lib/doc.mjs`;
 - triggers Figma's own copy handler (`execCommand('copy')` on `input.focus-target`) for the node and Copy-as-PNG.
 
+## Speed
+
+Measured on a 154k-node file (View seat):
+
+| Call | Time |
+| --- | --- |
+| Node on a page recorded in the last 30 min (`REFIGMA_DOC_MAX_AGE`), incl. `figma_get_nodes` batches | ~3-5s (no browser; the page is decoded once per batch) |
+| First node of a page / older recording (live capture: Figma's copy data + PNG) | ~25-35s, mostly Figma: ~10s for the server to send the page, ~11s for its own JS to load it |
+| `figma_get_metadata` / `figma_search` on a new page (document only) | ~12s |
+| Anything already captured | instant (cache) |
+
+Both sources produce the same code: style references (library shadow / image fill / text styles) are resolved to the
+style's current values for every node and instance override. Figma's copy handler skips them inside overrides, so
+this also fixes clipboard output. A recorded document is only used when every image of the node has a URL; otherwise
+the node is captured live. `REFIGMA_SOURCE=clipboard` forces live captures. `REFIGMA_PROTO=1` (experimental) tries
+the prototype viewer first, which loads just the frame (~1MB instead of the whole page), but timing varies (10-25s)
+and images the browser already cached are not seen.
+
 ## What makes it faithful
 
 - Instances are expanded the way Figma does: `guidPath` overrides (instance boundaries only), component properties
@@ -62,4 +80,5 @@ Microsoft Edge profile (one Keychain prompt). `figma_relogin` refreshes it from 
 - FigJam: geometry renderer started (`figjam_svg`), not finished/verified yet.
 - Fonts missing from Google Fonts fall back; boolean SUBTRACT/INTERSECT use SVG masks (approximate for exotic cases).
 - A static frame has no hover/responsive behaviour; sizes are exact px with hug/fill recorded in the tree.
-- Images whose URL isn't in the clipboard are fetched via REST image-fills (Tier 2: per-minute quota) with `FIGMA_API_KEY`/`FIGMA_ACCESS_TOKEN`.
+- Images whose URL isn't in the clipboard are fetched via REST image-fills (Tier 2: per-minute quota) with `FIGMA_API_KEY`/`FIGMA_ACCESS_TOKEN`;
+  the response is cached per file for 12h and image files are shared per file in `~/.figma-local/out/<file>/_images`.
