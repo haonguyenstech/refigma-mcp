@@ -1,0 +1,803 @@
+"""Resolve a decoded Figma clipboard message into a normalized model, then emit
+tree.txt, index.html (+ inline CSS), SVG icons, downloaded images and tokens.
+
+usage: extract.py <msg.json> <root node id> <out dir>
+"""
+import base64, copy, hashlib, html, json, math, os, re, struct, sys, urllib.request
+
+MSG, ROOT, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
+msg = json.load(open(MSG))
+N = msg['nodeChanges']
+META = msg.get('__figmeta', {})
+g = lambda x: f"{x['sessionID']}:{x['localID']}"
+byid = {g(n['guid']): n for n in N}
+kids = {}
+for n in N:
+    p = n.get('parentIndex')
+    if p: kids.setdefault(g(p['guid']), []).append(n)
+for v in kids.values(): v.sort(key=lambda c: c['parentIndex']['position'])
+
+# ---------------------------------------------------------------- variables / tokens
+VARS = {}           # key or guid -> VARIABLE node
+for n in N:
+    if n.get('type') == 'VARIABLE':
+        VARS[g(n['guid'])] = n
+        if n.get('key'): VARS[n['key']] = n
+SETS = {}
+for n in N:
+    if n.get('type') == 'VARIABLE_SET':
+        SETS[g(n['guid'])] = n
+        if n.get('key'): SETS[n['key']] = n
+
+def alias_target(v):
+    a = (v or {}).get('value', {}).get('alias', {})
+    if 'assetRef' in a: return VARS.get(a['assetRef']['key'])
+    if 'guid' in a: return VARS.get(g(a['guid']))
+
+MODE_CTX = [{}]   # stack of {variable set key -> mode id} from variableModeBySetMap on ancestors
+
+def set_key(sid):
+    sid = sid or {}
+    return sid.get('assetRef', {}).get('key') or (g(sid['guid']) if 'guid' in sid else None)
+
+def resolve_var(var, depth=0):
+    """Value of a variable in the active mode (explicit frame mode, else the collection's first mode)."""
+    if not var or depth > 10: return None
+    sk = set_key(var.get('variableSetID'))
+    vset = SETS.get(sk) or {}
+    modes = sorted(vset.get('variableSetModes', []), key=lambda m_: m_.get('sortPosition', ''))
+    want = MODE_CTX[-1].get(sk) or (g(modes[0]['id']) if modes else None)
+    entries = var.get('variableDataValues', {}).get('entries', [])
+    e = next((x for x in entries if g(x['modeID']) == want), entries[0] if entries else None)
+    if not e: return None
+    d = e.get('variableData', {}); val = d.get('value', {})
+    if 'alias' in val: return resolve_var(alias_target(d), depth + 1)
+    return val.get('colorValue') or val.get('floatValue') or val.get('textValue')
+
+def push_modes(n):
+    ctx = dict(MODE_CTX[-1])
+    for e in (n.get('variableModeBySetMap') or {}).get('entries', []):
+        sk = set_key(e.get('variableSetID') or e.get('setID') or {})
+        mid = e.get('variableModeID') or e.get('modeID')
+        if sk and mid: ctx[sk] = g(mid)
+    MODE_CTX.append(ctx)
+
+USED_TOKENS = {}
+def token_of(v):
+    t = alias_target(v)
+    if t:
+        USED_TOKENS[t['name']] = t
+        return t['name']
+
+def css_var(name):
+    return '--' + re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+
+def var_value(var, depth=0):
+    """Resolved values of a variable per mode name."""
+    out = {}
+    sid = var.get('variableSetID') or {}
+    vset = SETS.get(sid.get('assetRef', {}).get('key')) or (SETS.get(g(sid['guid'])) if 'guid' in sid else None)
+    modes = {g(m['id']): m['name'] for m in (vset or {}).get('variableSetModes', [])}
+    for e in var.get('variableDataValues', {}).get('entries', []):
+        mode = modes.get(g(e['modeID']), g(e['modeID']))
+        d = e.get('variableData', {})
+        val = d.get('value', {})
+        if 'alias' in val and depth < 8:
+            t = alias_target(d)
+            if t:
+                sub = var_value(t, depth + 1)
+                out[mode] = next(iter(sub.values()), None) if sub else None
+                continue
+        if 'colorValue' in val: out[mode] = rgba(val['colorValue'])
+        elif 'floatValue' in val: out[mode] = val['floatValue']
+        elif 'textValue' in val: out[mode] = val['textValue']
+        elif 'boolValue' in val: out[mode] = val['boolValue']
+    return out
+
+# ---------------------------------------------------------------- color / paint helpers
+def rgba(c, op=1.0):
+    a = c.get('a', 1) * op
+    r, gg, b = (round(c[k] * 255) for k in 'rgb')
+    return f'#{r:02X}{gg:02X}{b:02X}' if a >= 0.999 else f'rgba({r},{gg},{b},{a:.3f})'.replace('.000)', ')')
+
+def inv(t):
+    a, b, c, d, e, f = t['m00'], t['m01'], t['m02'], t['m10'], t['m11'], t['m12']
+    det = a * e - b * d or 1e-9
+    return {'m00': e / det, 'm01': -b / det, 'm02': (b * f - c * e) / det,
+            'm10': -d / det, 'm11': a / det, 'm12': (c * d - a * f) / det}
+
+def apply_t(t, x, y): return (t['m00'] * x + t['m01'] * y + t['m02'], t['m10'] * x + t['m11'] * y + t['m12'])
+
+def paint(p, w, h):
+    if not p.get('visible', True): return None
+    op = p.get('opacity', 1)
+    t = p['type']
+    if t == 'SOLID':
+        # a bound variable is authoritative; the paint's cached colour can be stale (e.g. after a variant swap)
+        var = alias_target(p.get('colorVar'))
+        c = resolve_var(var) if var else None
+        return {'type': 'solid', 'color': rgba(c if isinstance(c, dict) else p['color'], op), 'token': token_of(p.get('colorVar'))}
+    if t.startswith('GRADIENT'):
+        stops = [{'color': rgba(s['color'], op), 'pos': s['position']} for s in p.get('stops', [])]
+        it = inv(p.get('transform') or {'m00': 1, 'm01': 0, 'm02': 0, 'm10': 0, 'm11': 1, 'm12': 0})
+        if t == 'GRADIENT_LINEAR':
+            x0, y0 = apply_t(it, 0, .5); x1, y1 = apply_t(it, 1, .5)
+            dx, dy = (x1 - x0) * w, (y1 - y0) * h
+            ang = math.degrees(math.atan2(dx, -dy)) % 360
+            th = math.radians(ang); ux, uy = math.sin(th), -math.cos(th)
+            L = abs(w * ux) + abs(h * uy) or 1
+            cx, cy = w / 2, h / 2
+            css = []
+            for s in stops:
+                px, py = x0 * w + s['pos'] * dx, y0 * h + s['pos'] * dy
+                css.append(f"{s['color']} {((px - cx) * ux + (py - cy) * uy) / L * 100 + 50:.2f}%")
+            return {'type': 'linear', 'angle': round(ang, 2), 'stops': stops, 'p0': (x0 * w, y0 * h), 'p1': (x1 * w, y1 * h),
+                    'css': f"linear-gradient({ang:.2f}deg, {', '.join(css)})"}
+        cx, cy = apply_t(it, .5, .5); ex, ey = apply_t(it, 1, .5); fx, fy = apply_t(it, .5, 1)
+        rx = math.hypot((ex - cx) * w, (ey - cy) * h); ry = math.hypot((fx - cx) * w, (fy - cy) * h)
+        css = ', '.join(f"{s['color']} {s['pos'] * 100:.2f}%" for s in stops)
+        kind = 'radial' if t == 'GRADIENT_RADIAL' else t[9:].lower()
+        if kind == 'angular':
+            return {'type': kind, 'stops': stops, 'css': f"conic-gradient(from 90deg at {cx * 100:.2f}% {cy * 100:.2f}%, {css})"}
+        return {'type': kind, 'stops': stops, 'c': (cx * w, cy * h), 'r': (rx, ry),
+                'css': f"radial-gradient({rx:.1f}px {ry:.1f}px at {cx * 100:.2f}% {cy * 100:.2f}%, {css})"}
+    if t == 'IMAGE':
+        hsh = (p.get('image') or {}).get('hash')
+        return {'type': 'image', 'hash': hsh, 'scale': p.get('imageScaleMode', 'FILL'), 'opacity': op}
+    return {'type': t.lower()}
+
+def paints(ps, w, h): return [x for x in (paint(p, w, h) for p in ps or []) if x]
+
+def effect(e):
+    if not e.get('visible', True): return None
+    t = e['type']
+    if t in ('DROP_SHADOW', 'INNER_SHADOW'):
+        o = e.get('offset', {})
+        return {'type': 'inner' if t == 'INNER_SHADOW' else 'drop', 'x': o.get('x', 0), 'y': o.get('y', 0),
+                'blur': e.get('radius', 0), 'spread': e.get('spread', 0),
+                'color': rgba((lambda c: c if isinstance(c, dict) else e.get('color', {'r': 0, 'g': 0, 'b': 0, 'a': .25}))(resolve_var(alias_target(e.get('colorVar'))))),
+                'token': token_of(e.get('colorVar'))}
+    if t in ('FOREGROUND_BLUR', 'LAYER_BLUR'): return {'type': 'blur', 'radius': e.get('radius', 0)}
+    if t == 'BACKGROUND_BLUR': return {'type': 'bg-blur', 'radius': e.get('radius', 0)}
+
+# ---------------------------------------------------------------- instance resolution
+key = lambda n: g(n.get('overrideKey') or n['guid'])
+
+VISUAL = ('fillPaints', 'strokePaints', 'strokeWeight', 'strokeAlign', 'strokeJoin', 'strokeCap', 'dashPattern',
+          'borderStrokeWeightsIndependent', 'borderTopWeight', 'borderRightWeight', 'borderBottomWeight', 'borderLeftWeight',
+          'cornerRadius', 'rectangleCornerRadiiIndependent', 'rectangleTopLeftCornerRadius', 'rectangleTopRightCornerRadius',
+          'rectangleBottomLeftCornerRadius', 'rectangleBottomRightCornerRadius', 'effects', 'opacity', 'frameMaskDisabled',
+          'stackMode', 'stackSpacing', 'stackHorizontalPadding', 'stackVerticalPadding', 'stackPaddingRight', 'stackPaddingBottom',
+          'stackPrimaryAlignItems', 'stackCounterAlignItems', 'stackPrimarySizing', 'stackCounterSizing', 'stackWrap', 'stackCounterSpacing')
+
+def apply_ov(n, ov):
+    if not ov: return n
+    n = copy.copy(n)
+    for k, v in ov.items():
+        if k == 'guidPath': continue
+        if k == 'componentPropAssignments':
+            # merge per property definition; the override wins for the props it names
+            merged = {g(a['defID']): a for a in n.get(k) or []}
+            merged.update({g(a['defID']): a for a in v})
+            n[k] = list(merged.values())
+        else: n[k] = v
+    if n.get('type') == 'INSTANCE' and 'overriddenSymbolID' in ov:
+        n['_explicit'] = set(ov)
+    return n
+
+def ovmap(entries):
+    m = {}
+    for e in entries or []:
+        path = tuple(g(x) for x in e.get('guidPath', {}).get('guids', []))
+        if path: m.setdefault(path, {}).update(e)
+    return m
+
+PROPDEFS = {}
+for n in N:
+    for d in n.get('componentPropDefs') or []:
+        if 'initialValue' in d: PROPDEFS[g(d['id'])] = d['initialValue']
+
+def propdefault(sym, defid):
+    for d in sym.get('componentPropDefs') or []:
+        if g(d['id']) == defid:
+            if 'initialValue' in d: return d['initialValue']
+            if d.get('parentPropDefId'): return PROPDEFS.get(g(d['parentPropDefId']))
+
+def apply_props(n, pv):
+    if not pv or not n.get('componentPropRefs'): return n
+    n = copy.copy(n)
+    for r in n['componentPropRefs']:
+        v = pv.get(g(r['defID']))
+        if v is None: continue
+        f = r.get('componentPropNodeField')
+        if f == 'VISIBLE' and 'boolValue' in v: n['visible'] = v['boolValue']
+        elif f == 'TEXT_DATA' and 'textValue' in v: n['textData'] = v['textValue']
+        elif f == 'OVERRIDDEN_SYMBOL_ID' and 'guidValue' in v: n['overriddenSymbolID'] = v['guidValue']
+    return n
+
+def resolve(n, ov=None, pv=None):
+    """Return a resolved raw node with '_children' (instances expanded, overrides/props applied)."""
+    ov = ov or {}
+    n = dict(n)
+    if n.get('type') == 'INSTANCE':
+        sym_id = g(n['overriddenSymbolID']) if n.get('overriddenSymbolID') else g((n.get('symbolData') or {}).get('symbolID') or n['guid'])
+        sym = byid.get(sym_id, {})
+        n['_component'] = sym.get('name')
+        inner = ovmap((n.get('symbolData') or {}).get('symbolOverrides'))
+        for path, e in ovmap(n.get('derivedSymbolData')).items():
+            d = inner.setdefault(path, {})
+            for k in ('size', 'transform', 'derivedTextData'):
+                if k in e and k not in d: d[k] = e[k]
+        for path, e in ov.items(): inner.setdefault(path, {}).update(e)
+        ipv = {}
+        for d in sym.get('componentPropDefs') or []:
+            v = propdefault(sym, g(d['id']))
+            if v is not None: ipv[g(d['id'])] = v
+        for a in n.get('componentPropAssignments') or []:
+            ipv[g(a['defID'])] = a.get('value') or {}
+        # the symbol's own frame styling is the instance's base; instance fields win
+        base = {k: v for k, v in sym.items() if k not in ('guid', 'parentIndex', 'transform', 'name', 'type', 'size', 'visible', 'componentPropDefs')}
+        orig = g((n.get('symbolData') or {}).get('symbolID') or n['guid'])
+        if sym_id != orig:
+            # variant swapped from outside: the raw node still carries the old variant's styling
+            explicit = n.get('_explicit', set())
+            for k in VISUAL:
+                if k in explicit: continue
+                if k in sym: n[k] = sym[k]
+                else: n.pop(k, None)
+        for k, v in base.items(): n.setdefault(k, v)
+        n['_children'] = [resolve_child(c, inner, ipv) for c in kids.get(sym_id, [])]
+    else:
+        n['_children'] = [resolve_child(c, ov, pv) for c in kids.get(g(n['guid']), [])]
+    n['_children'] = [c for c in n['_children'] if c]
+    return n
+
+def resolve_child(c, ov, pv):
+    k = key(c)
+    c = apply_props(apply_ov(c, ov.get((k,))), pv)
+    if c.get('type') == 'INSTANCE':
+        return resolve(c, {p[1:]: e for p, e in ov.items() if len(p) > 1 and p[0] == k}, None)
+    return resolve(c, ov, pv)
+
+# ---------------------------------------------------------------- vector geometry
+def blob(i):
+    b = msg['blobs'][i]['bytes']
+    return base64.b64decode(b[4:]) if b.startswith('b64:') else bytes.fromhex(b)
+
+def vector_paths(n):
+    """SVG path data from a vector network blob, scaled to the node size. -> (fill_paths, stroke_path)"""
+    vd = n.get('vectorData') or {}
+    if 'vectorNetworkBlob' not in vd: return [], ''
+    raw = blob(vd['vectorNetworkBlob'])
+    nv, ns, nr = struct.unpack_from('<III', raw, 0); o = 12
+    ns_ = vd.get('normalizedSize') or n.get('size')
+    sx = n['size']['x'] / (ns_['x'] or 1); sy = n['size']['y'] / (ns_['y'] or 1)
+    V = []
+    for _ in range(nv):
+        _, x, y = struct.unpack_from('<Iff', raw, o); o += 12; V.append((x * sx, y * sy))
+    S = []
+    for _ in range(ns):
+        _, a, tax, tay, b, tbx, tby = struct.unpack_from('<IIffIff', raw, o); o += 28
+        S.append((a, tax * sx, tay * sy, b, tbx * sx, tby * sy))
+    f = lambda v: f'{v:.3f}'.rstrip('0').rstrip('.')
+    def seg_cmd(s, rev=False):
+        a, tax, tay, b, tbx, tby = s
+        if rev: a, b, tax, tay, tbx, tby = b, a, tbx, tby, tax, tay
+        (x0, y0), (x1, y1) = V[a], V[b]
+        if tax == tay == tbx == tby == 0: return f'L{f(x1)} {f(y1)}'
+        return f'C{f(x0 + tax)} {f(y0 + tay)} {f(x1 + tbx)} {f(y1 + tby)} {f(x1)} {f(y1)}'
+    def chain(idx):
+        d, cur = [], None
+        for i in idx:
+            a, b = S[i][0], S[i][3]
+            rev = False
+            if cur is not None and cur != a and cur == b: rev = True
+            start = b if rev else a
+            if cur != start: d.append(f'M{f(V[start][0])} {f(V[start][1])}')
+            d.append(seg_cmd(S[i], rev)); cur = a if rev else b
+        return ''.join(d)
+    fills = []
+    for _ in range(nr):
+        hdr, nloops = struct.unpack_from('<II', raw, o); o += 8
+        loops = []
+        for _ in range(nloops):
+            cnt, = struct.unpack_from('<I', raw, o); o += 4
+            idx = struct.unpack_from(f'<{cnt}I', raw, o); o += 4 * cnt
+            loops.append(chain(idx) + 'Z')
+        fills.append({'d': ''.join(loops), 'rule': 'nonzero' if hdr & 1 else 'evenodd'})
+    stroke = chain(range(ns))
+    if not fills and ns: fills = [{'d': stroke, 'rule': 'nonzero'}]
+    return fills, stroke
+
+# ---------------------------------------------------------------- normalized model
+WEIGHTS = {'thin': 100, 'hairline': 100, 'extralight': 200, 'ultralight': 200, 'light': 300, 'regular': 400, 'normal': 400, 'book': 400,
+           'medium': 500, 'semibold': 600, 'demibold': 600, 'bold': 700, 'extrabold': 800, 'ultrabold': 800, 'black': 900, 'heavy': 900}
+def font_weight(style):
+    s = (style or '').lower().replace(' ', '').replace('-', '').replace('italic', '')
+    return WEIGHTS.get(s, 400)
+
+VECTORISH = {'VECTOR', 'BOOLEAN_OPERATION', 'ELLIPSE', 'STAR', 'REGULAR_POLYGON', 'LINE', 'RECTANGLE', 'ROUNDED_RECTANGLE'}
+ICONS, IMAGES = {}, set()
+
+def text_model(n):
+    td = n.get('textData') or {}
+    chars = td.get('characters', '')
+    fn = n.get('fontName', {})
+    base = {'family': fn.get('family'), 'style': fn.get('style'), 'weight': font_weight(fn.get('style')),
+            'italic': 'italic' in (fn.get('style') or '').lower(), 'size': n.get('fontSize', 12),
+            'lineHeight': n.get('lineHeight'), 'letterSpacing': n.get('letterSpacing'),
+            'decoration': n.get('textDecoration'), 'case': n.get('textCase'),
+            'fills': paints(n.get('fillPaints'), 1, 1)}
+    runs = [{'text': chars, **base}]
+    ids, table = td.get('characterStyleIDs'), {s['styleID']: s for s in td.get('styleOverrideTable') or n.get('styleOverrideTable') or [] if 'styleID' in s}
+    if ids and table:
+        runs, cur, start = [], None, 0
+        ids = list(ids) + [0] * (len(chars) - len(ids))
+        for i in range(len(chars) + 1):
+            sid = ids[i] if i < len(chars) else None
+            if sid != cur or i == len(chars):
+                if i > start:
+                    st = dict(base); o = table.get(cur, {})
+                    if 'fontName' in o: st.update(family=o['fontName'].get('family'), style=o['fontName'].get('style'), weight=font_weight(o['fontName'].get('style')), italic='italic' in o['fontName'].get('style', '').lower())
+                    for k_src, k_dst in (('fontSize', 'size'), ('lineHeight', 'lineHeight'), ('letterSpacing', 'letterSpacing'), ('textDecoration', 'decoration'), ('textCase', 'case')):
+                        if k_src in o: st[k_dst] = o[k_src]
+                    if 'fillPaints' in o: st['fills'] = paints(o['fillPaints'], 1, 1)
+                    runs.append({'text': chars[start:i], **st})
+                cur, start = sid, i
+    return {'characters': chars, 'runs': runs, 'alignH': n.get('textAlignHorizontal', 'LEFT'), 'alignV': n.get('textAlignVertical', 'TOP'),
+            'autoResize': n.get('textAutoResize', 'NONE'), 'paragraphSpacing': n.get('paragraphSpacing', 0),
+            'truncate': n.get('textTruncation') == 'ENDING', 'maxLines': n.get('maxLines'), **base}
+
+def model(n, parent_layout=None):
+    if not n.get('visible', True): return None
+    push_modes(n)
+    try: return _model(n, parent_layout)
+    finally: MODE_CTX.pop()
+
+def _model(n, parent_layout=None):
+    t = n.get('type'); s = n.get('size', {'x': 0, 'y': 0}); tr = n.get('transform', {})
+    w, h = s.get('x', 0), s.get('y', 0)
+    m = {'id': g(n['guid']), 'type': t, 'name': n.get('name', ''), 'w': w, 'h': h,
+         'x': tr.get('m02', 0), 'y': tr.get('m12', 0), 'rotation': round(math.degrees(math.atan2(tr.get('m10', 0), tr.get('m00', 1))), 3)}
+    if n.get('_component'): m['component'] = n['_component']
+    if n.get('opacity', 1) < 0.999: m['opacity'] = n['opacity']
+    if n.get('blendMode') not in (None, 'NORMAL', 'PASS_THROUGH'): m['blend'] = n['blendMode'].lower().replace('_', '-')
+    if n.get('stackMode') in ('HORIZONTAL', 'VERTICAL'):
+        hp = n.get('stackHorizontalPadding', 0); vp = n.get('stackVerticalPadding', 0)
+        m['layout'] = {'dir': 'row' if n['stackMode'] == 'HORIZONTAL' else 'col', 'gap': n.get('stackSpacing', 0),
+                       'pad': [vp, n.get('stackPaddingRight', hp), n.get('stackPaddingBottom', vp), hp],
+                       'justify': n.get('stackPrimaryAlignItems', 'MIN'), 'align': n.get('stackCounterAlignItems', 'MIN'),
+                       'wrap': n.get('stackWrap') == 'WRAP', 'counterGap': n.get('stackCounterSpacing'),
+                       'primarySizing': n.get('stackPrimarySizing', 'FIXED'), 'counterSizing': n.get('stackCounterSizing', 'FIXED'),
+                       'strokesInLayout': n.get('strokesIncludedInLayout', False), 'reverseZ': bool(n.get('stackReverseZIndex'))}
+    if parent_layout:
+        ch = {}
+        if n.get('stackPositioning') == 'ABSOLUTE': ch['absolute'] = True
+        if n.get('stackChildPrimaryGrow'): ch['grow'] = True
+        if n.get('stackChildAlignSelf') == 'STRETCH': ch['stretch'] = True
+        if ch: m['child'] = ch
+    for k in ('minSize', 'maxSize'):
+        if n.get(k): m[k] = n[k]
+    fills = paints(n.get('fillPaints'), w, h)
+    for f in fills:
+        if f['type'] == 'image' and f.get('hash'): IMAGES.add(f['hash'])
+    strokes = paints(n.get('strokePaints'), w, h)
+    if fills and t != 'TEXT': m['fills'] = fills
+    if strokes and n.get('strokeWeight', 0) > 0 and t != 'TEXT':
+        st = {'paints': strokes, 'weight': n.get('strokeWeight', 1), 'align': n.get('strokeAlign', 'INSIDE'),
+              'cap': n.get('strokeCap'), 'join': n.get('strokeJoin'), 'dash': n.get('dashPattern')}
+        if n.get('borderStrokeWeightsIndependent'):
+            st['sides'] = [n.get('borderTopWeight', 0), n.get('borderRightWeight', 0), n.get('borderBottomWeight', 0), n.get('borderLeftWeight', 0)]
+        m['stroke'] = st
+    if n.get('rectangleCornerRadiiIndependent'):
+        r = [n.get(f'rectangle{c}CornerRadius', 0) for c in ('TopLeft', 'TopRight', 'BottomRight', 'BottomLeft')]
+        if any(r): m['radius'] = r
+    elif n.get('cornerRadius'): m['radius'] = [n['cornerRadius']] * 4
+    effs = [e for e in (effect(e) for e in n.get('effects') or []) if e]
+    if effs: m['effects'] = effs
+    if t in ('FRAME', 'INSTANCE', 'SYMBOL') and not n.get('frameMaskDisabled', False): m['clip'] = True
+    if t == 'TEXT': m['text'] = text_model(n)
+    if t == 'VECTOR': m['paths'], m['strokePath'] = vector_paths(n)
+    if t == 'BOOLEAN_OPERATION': m['boolean'] = n.get('booleanOperation', 'UNION')
+    if t in ('STAR', 'REGULAR_POLYGON'): m['points'] = n.get('count', 5); m['innerRadius'] = n.get('starInnerScale', .38)
+    if t == 'ELLIPSE' and n.get('arcData'): m['arc'] = n['arcData']
+    lay = m.get('layout')
+    m['children'] = [c for c in (model(c, lay) for c in n['_children']) if c]
+    plain = not (m.get('fills') or m.get('layout') or m.get('effects') or m.get('stroke'))
+    if t not in ('TEXT',) and plain and m['children'] and all_vector(m): m['icon'] = True
+    elif t in VECTORISH and t not in ('RECTANGLE', 'ROUNDED_RECTANGLE', 'LINE'): m['icon'] = True
+    return m
+
+def all_vector(m):
+    for c in m['children']:
+        if c['type'] in VECTORISH: continue
+        if c['type'] in ('FRAME', 'INSTANCE', 'SYMBOL') and c['children'] and not c.get('layout') and not c.get('fills') and all_vector(c): continue
+        if c['type'] in ('FRAME', 'INSTANCE', 'SYMBOL') and not c['children']: continue
+        return False
+    return any(c['type'] in VECTORISH for c in walk_all(m))
+
+def walk_all(m):
+    for c in m['children']:
+        yield c; yield from walk_all(c)
+
+# ---------------------------------------------------------------- SVG
+fmt = lambda v: f'{v:.3f}'.rstrip('0').rstrip('.') if isinstance(v, float) else str(v)
+
+def svg_paint(ps, defs=None):
+    for p in reversed(ps or []):  # topmost paint
+        if p['type'] == 'solid': return p['color']
+        if defs is not None and p['type'] in ('linear', 'radial') and p.get('stops'):
+            gid = f'g{len(defs)}_{seq[0]}'
+            stops = ''.join(f'<stop offset="{fmt(float(st["pos"]))}" stop-color="{st["color"]}"/>' for st in p['stops'])
+            if p['type'] == 'linear':
+                (x1, y1), (x2, y2) = p['p0'], p['p1']
+                defs.append(f'<linearGradient id="{gid}" gradientUnits="userSpaceOnUse" x1="{fmt(x1)}" y1="{fmt(y1)}" x2="{fmt(x2)}" y2="{fmt(y2)}">{stops}</linearGradient>')
+            else:
+                (cx, cy), (rx, ry) = p['c'], p['r']
+                defs.append(f'<radialGradient id="{gid}" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="translate({fmt(cx)} {fmt(cy)}) scale({fmt(rx)} {fmt(ry)})">{stops}</radialGradient>')
+            return f'url(#{gid})'
+    return 'none'
+
+def svg_node(m, defs, top=False):
+    """SVG markup for a vector-ish node, in its parent's coordinate space."""
+    if top: tf = ''
+    else:
+        tf = f' transform="translate({fmt(m["x"])} {fmt(m["y"])})' + (f' rotate({fmt(m["rotation"])})' if m['rotation'] else '') + '"'
+    op = f' opacity="{fmt(m["opacity"])}"' if m.get('opacity') is not None else ''
+    t = m['type']; w, h = m['w'], m['h']
+    fill = svg_paint(m.get('fills'), defs); st = m.get('stroke')
+    sattr = ''
+    if st:
+        sw = st['weight']
+        sattr = f' stroke="{svg_paint(st["paints"], defs)}" stroke-width="{fmt(sw)}"'
+        if st.get('cap') and st['cap'] != 'NONE': sattr += f' stroke-linecap="{ {"ROUND": "round", "SQUARE": "square"}.get(st["cap"], "butt") }"'
+        if st.get('join'): sattr += f' stroke-linejoin="{st["join"].lower()}"'
+        if st.get('dash'): sattr += f' stroke-dasharray="{" ".join(fmt(x) for x in st["dash"])}"'
+    if t == 'VECTOR':
+        out = []
+        for p in m.get('paths', []):
+            if fill != 'none': out.append(f'<path d="{p["d"]}" fill="{fill}" fill-rule="{p["rule"]}"/>')
+        if st and m.get('strokePath'): out.append(f'<path d="{m["strokePath"]}" fill="none"{sattr}/>')
+        return f'<g{tf}{op}>' + ''.join(out) + '</g>'
+    if t == 'ELLIPSE':
+        return f'<ellipse{tf}{op} cx="{fmt(w / 2)}" cy="{fmt(h / 2)}" rx="{fmt(w / 2)}" ry="{fmt(h / 2)}" fill="{fill}"{sattr}/>'
+    if t in ('RECTANGLE', 'ROUNDED_RECTANGLE'):
+        r = (m.get('radius') or [0])[0]
+        return f'<rect{tf}{op} width="{fmt(w)}" height="{fmt(h)}" rx="{fmt(r)}" fill="{fill}"{sattr}/>'
+    if t == 'LINE':
+        return f'<line{tf}{op} x1="0" y1="0" x2="{fmt(w)}" y2="0"{sattr or " stroke=\"#000\""}/>'
+    if t in ('STAR', 'REGULAR_POLYGON'):
+        pts, k = [], m.get('points', 5)
+        for i in range(k * (2 if t == 'STAR' else 1)):
+            a = -math.pi / 2 + i * math.pi / (k if t == 'STAR' else k / 2)
+            r = (m['innerRadius'] if t == 'STAR' and i % 2 else 1)
+            pts.append(f'{fmt(w / 2 + math.cos(a) * w / 2 * r)},{fmt(h / 2 + math.sin(a) * h / 2 * r)}')
+        return f'<polygon{tf}{op} points="{" ".join(pts)}" fill="{fill}"{sattr}/>'
+    inner = ''.join(svg_node(c, defs) for c in m['children'])
+    if t == 'BOOLEAN_OPERATION' and m['boolean'] in ('SUBTRACT', 'INTERSECT') and len(m['children']) > 1:
+        mid = f'b{len(defs)}'
+        first = svg_node(m['children'][0], defs)
+        rest = ''.join(svg_node(c, defs) for c in m['children'][1:])
+        if m['boolean'] == 'SUBTRACT':
+            defs.append(f'<mask id="{mid}" maskUnits="userSpaceOnUse"><rect x="-1e4" y="-1e4" width="2e4" height="2e4" fill="#fff"/><g fill="#000" stroke="#000">{rest}</g></mask>')
+            return f'<g{tf}{op} mask="url(#{mid})">{first}</g>'
+        defs.append(f'<clipPath id="{mid}">{rest}</clipPath>')
+        return f'<g{tf}{op} clip-path="url(#{mid})">{first}</g>'
+    if t == 'BOOLEAN_OPERATION' and fill != 'none':
+        inner = re.sub(r'fill="[^"]*"', f'fill="{fill}"', inner)
+    return f'<g{tf}{op}>{inner}</g>'
+
+def svg_doc(m):
+    defs = []
+    body = svg_node(m, defs, top=True)
+    d = f'<defs>{"".join(defs)}</defs>' if defs else ''
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{fmt(m["w"])}" height="{fmt(m["h"])}" '
+            f'viewBox="0 0 {fmt(m["w"])} {fmt(m["h"])}" fill="none" overflow="visible">{d}{body}</svg>')
+
+def icon_file(m):
+    svg = svg_doc(m)
+    name = re.sub(r'[^a-z0-9]+', '-', (m.get('component') or m['name']).lower()).strip('-') or 'icon'
+    hsh = hashlib.sha1(svg.encode()).hexdigest()[:6]
+    fn = f'{name}.svg' if ICONS.get(f'{name}.svg', svg) == svg else f'{name}-{hsh}.svg'
+    ICONS[fn] = svg
+    return fn, svg
+
+# ---------------------------------------------------------------- HTML / CSS
+CSS, HTML_FONTS = [], {}
+seq = [0]
+
+OUTLINE = {}   # id(model) -> outline declaration for uniform solid strokes
+PAINTED = {}   # token -> colour as painted in this frame (authoritative over the variable's default mode)
+def color_css(p):
+    if p['type'] == 'solid' and p.get('token'): PAINTED.setdefault(p['token'], p['color'])
+    if p['type'] == 'solid': return f"var({css_var(p['token'])}, {p['color']})" if p.get('token') else p['color']
+    return p.get('css', 'transparent')
+
+def bg_css(fills):
+    layers = []
+    for p in reversed(fills):  # Figma: last paint is on top; CSS: first layer is on top
+        if p['type'] == 'solid': layers.append(f"linear-gradient({color_css(p)}, {color_css(p)})")
+        elif p['type'] == 'image':
+            size = {'FILL': 'cover', 'FIT': 'contain', 'TILE': 'auto', 'STRETCH': '100% 100%'}.get(p['scale'], 'cover')
+            layers.append(f"url(assets/images/{p['hash']}.png) center / {size} {'repeat' if p['scale'] == 'TILE' else 'no-repeat'}")
+        elif 'css' in p: layers.append(p['css'])
+    if len(fills) == 1 and fills[0]['type'] == 'solid': return f"background: {color_css(fills[0])};"
+    return f"background: {', '.join(layers)};" if layers else ''
+
+def lh_css(lh, size):
+    if not lh: return 'normal'
+    if lh.get('units') == 'PIXELS': return f"{fmt(lh['value'])}px"
+    if lh.get('units') == 'PERCENT': return 'normal' if abs(lh['value'] - 100) < .01 else f"{fmt(lh['value'] / 100 * size)}px"
+    return fmt(lh.get('value', 1.2))
+
+def ls_css(ls):
+    if not ls or not ls.get('value'): return None
+    return f"{fmt(ls['value'] / 100)}em" if ls.get('units') == 'PERCENT' else f"{fmt(ls['value'])}px"
+
+def run_css(r, base=None):
+    out = []
+    if not base or r['family'] != base['family']: out.append(f"font-family: '{r['family']}', sans-serif")
+    if not base or r['weight'] != base['weight']: out.append(f"font-weight: {r['weight']}")
+    if r['italic'] and (not base or not base['italic']): out.append('font-style: italic')
+    if not base or r['size'] != base['size']: out.append(f"font-size: {fmt(r['size'])}px")
+    if not base or r['lineHeight'] != base['lineHeight']: out.append(f"line-height: {lh_css(r['lineHeight'], r['size'])}")
+    ls = ls_css(r['letterSpacing'])
+    if ls and (not base or r['letterSpacing'] != base['letterSpacing']): out.append(f'letter-spacing: {ls}')
+    if r.get('decoration') in ('UNDERLINE', 'STRIKETHROUGH') and (not base or r['decoration'] != base['decoration']):
+        out.append('text-decoration: ' + ('underline' if r['decoration'] == 'UNDERLINE' else 'line-through'))
+    case = {'UPPER': 'uppercase', 'LOWER': 'lowercase', 'TITLE': 'capitalize'}.get(r.get('case'))
+    if case and (not base or r['case'] != base['case']): out.append(f'text-transform: {case}')
+    if r['fills'] and (not base or r['fills'] != base['fills']):
+        f = r['fills'][0]
+        if f['type'] == 'solid': out.append(f'color: {color_css(f)}')
+        else: out.append(f"background: {f.get('css', 'none')}; -webkit-background-clip: text; background-clip: text; color: transparent")
+    HTML_FONTS.setdefault(r['family'], set()).add((r['weight'], r['italic']))
+    return out
+
+def shadow_css(m):
+    sh = []
+    st = m.get('stroke')
+    if st and m['type'] not in ('TEXT', 'LINE') and not m.get('icon'):
+        if st['paints'][0]['type'] != 'solid': return [e for e in effects_shadow(m)]
+        c = color_css(st['paints'][0])
+        w = st['weight']
+        if st.get('sides'):
+            t, r, b, l = st['sides']
+            ins = st['align'] != 'OUTSIDE'
+            for dx, dy, v in ((0, 1, t), (-1, 0, r), (0, -1, b), (1, 0, l)):
+                if v: sh.append(f"{'inset ' if ins else ''}{fmt(dx * v * (1 if ins else -1))}px {fmt(dy * v * (1 if ins else -1))}px 0 0 {c}")
+        else:
+            # uniform solid stroke -> outline: crisp, follows border-radius, takes no layout space, paints above children like Figma
+            off = {'INSIDE': -w, 'CENTER': -w / 2, 'OUTSIDE': 0}.get(st['align'], -w)
+            style = 'dashed' if st.get('dash') else 'solid'
+            OUTLINE[id(m)] = f'outline: {fmt(w)}px {style} {c}; outline-offset: {fmt(off)}px'
+    return sh + effects_shadow(m)
+
+def effects_shadow(m):
+    out = []
+    for e in m.get('effects', []):
+        if e['type'] in ('drop', 'inner'):
+            if e.get('token'): PAINTED.setdefault(e['token'], e['color'])
+            c = f"var({css_var(e['token'])}, {e['color']})" if e.get('token') else e['color']
+            out.append(f"{'inset ' if e['type'] == 'inner' else ''}{fmt(e['x'])}px {fmt(e['y'])}px {fmt(e['blur'])}px {fmt(e['spread'])}px {c}")
+    return out
+
+JUST = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end', 'SPACE_EVENLY': 'space-between', 'SPACE_BETWEEN': 'space-between'}
+ALIGN = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end', 'BASELINE': 'baseline'}
+
+def to_html(m, parent=None, depth=0):
+    seq[0] += 1
+    cls = f'n{seq[0]}'
+    css = []
+    pl = (parent or {}).get('layout')
+    ch = m.get('child', {})
+    in_flow = pl and not ch.get('absolute')
+    if parent is None:
+        css += ['position: relative', f"width: {fmt(m['w'])}px", f"height: {fmt(m['h'])}px"]
+    elif in_flow:
+        css.append('position: relative')
+        row = pl['dir'] == 'row'
+        prim, cross = ('width', 'height') if row else ('height', 'width')
+        pv, cv = (m['w'], m['h']) if row else (m['h'], m['w'])
+        css.append('flex: 1 1 0' if ch.get('grow') else 'flex: 0 0 auto')
+        css.append(f'min-{prim}: 0' if ch.get('grow') else f'{prim}: {fmt(pv)}px')
+        capped = ((m.get('maxSize') or {}).get('value') or {}).get('x' if row is False else 'y') is not None
+        if ch.get('stretch') and capped: css.append(f'{cross}: 100%')   # fill up to max, keep parent's cross alignment
+        elif ch.get('stretch'): css.append('align-self: stretch')
+        else: css.append(f'{cross}: {fmt(cv)}px')
+    else:
+        css += ['position: absolute', f"left: {fmt(m['x'])}px", f"top: {fmt(m['y'])}px", f"width: {fmt(m['w'])}px", f"height: {fmt(m['h'])}px"]
+    if m.get('_z'): css.append(f"z-index: {m['_z']}")
+    if m['rotation'] and parent is not None:
+        css += ['transform-origin: 0 0', f"transform: rotate({fmt(-m['rotation'])}deg)"]
+    if m.get('opacity') is not None: css.append(f"opacity: {fmt(m['opacity'])}")
+    if m.get('blend'): css.append(f"mix-blend-mode: {m['blend']}")
+    for k, prop in (('minSize', 'min'), ('maxSize', 'max')):
+        v = (m.get(k) or {}).get('value') or {}
+        if v.get('x') is not None: css.append(f"{prop}-width: {fmt(v['x'])}px")
+        if v.get('y') is not None: css.append(f"{prop}-height: {fmt(v['y'])}px")
+    attrs = f' class="{cls}" data-name="{html.escape(m["name"])}"' + (f' data-component="{html.escape(m["component"])}"' if m.get('component') else '')
+
+    if m.get('icon') and m['type'] != 'TEXT':
+        fn, svg = icon_file(m)
+        CSS.append(f".{cls} {{ {'; '.join(css)}; }}")
+        return f'{"  " * depth}<div{attrs} data-icon="assets/icons/{fn}">{svg}</div>'
+
+    if m.get('fills'): css.append(bg_css(m['fills']).rstrip(';'))
+    if m.get('radius'):
+        r = m['radius']; css.append('border-radius: ' + (f'{fmt(r[0])}px' if len(set(r)) == 1 else ' '.join(f'{fmt(x)}px' for x in r)))
+    sh = shadow_css(m)
+    if sh: css.append('box-shadow: ' + ', '.join(sh))
+    if id(m) in OUTLINE: css.append(OUTLINE[id(m)])
+    st = m.get('stroke')
+    if st and st['paints'][0]['type'] != 'solid' and 'css' in st['paints'][0] and not m.get('icon'):
+        w_ = st['weight']; inset = {'INSIDE': 0, 'CENTER': -w_ / 2, 'OUTSIDE': -w_}.get(st['align'], 0)
+        CSS.append(f".{cls}::before {{ content: ''; position: absolute; inset: {fmt(inset)}px; border-radius: inherit; padding: {fmt(w_)}px; "
+                   f"background: {st['paints'][0]['css']}; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); "
+                   f"-webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none; }}")
+        if parent is None or not in_flow: pass
+    for e in m.get('effects', []):
+        if e['type'] == 'blur': css.append(f"filter: blur({fmt(e['radius'] / 2)}px)")
+        if e['type'] == 'bg-blur': css.append(f"backdrop-filter: blur({fmt(e['radius'] / 2)}px)")
+    if m.get('clip'): css.append('overflow: hidden')
+    if m['type'] == 'ELLIPSE': css.append('border-radius: 50%')
+    if m['type'] == 'LINE' and m.get('stroke'):
+        css += [f"height: 0", f"border-top: {fmt(m['stroke']['weight'])}px solid {color_css(m['stroke']['paints'][0])}"]
+    lay = m.get('layout')
+    if lay:
+        css += ['display: flex', f"flex-direction: {'row' if lay['dir'] == 'row' else 'column'}",
+                f"justify-content: {JUST.get(lay['justify'], 'flex-start')}", f"align-items: {ALIGN.get(lay['align'], 'flex-start')}",
+                'box-sizing: border-box']
+        if lay['justify'] not in ('SPACE_EVENLY', 'SPACE_BETWEEN') and lay['gap']: css.append(f"gap: {fmt(lay['gap'])}px")
+        if lay['wrap']:
+            css.append('flex-wrap: wrap')
+            if lay.get('counterGap'): css.append(f"row-gap: {fmt(lay['counterGap'])}px" if lay['dir'] == 'row' else f"column-gap: {fmt(lay['counterGap'])}px")
+        if any(lay['pad']): css.append('padding: ' + ' '.join(f'{fmt(p)}px' for p in lay['pad']))
+
+    inner = ''
+    if m['type'] == 'TEXT':
+        tx = m['text']
+        base = tx['runs'][0] if tx['runs'] else tx
+        css += ['display: flex', 'flex-direction: column', 'justify-content: ' + {'TOP': 'flex-start', 'CENTER': 'center', 'BOTTOM': 'flex-end'}[tx['alignV']]]
+        css += run_css(base)
+        css.append('text-align: ' + {'LEFT': 'left', 'CENTER': 'center', 'RIGHT': 'right', 'JUSTIFIED': 'justify'}[tx['alignH']])
+        css.append('white-space: ' + ('pre' if tx['autoResize'] == 'WIDTH_AND_HEIGHT' else 'pre-wrap'))
+        if tx['autoResize'] == 'HEIGHT' and parent is not None and not ch.get('stretch'): pass
+        if tx['truncate']:
+            css += ['overflow: hidden', 'text-overflow: ellipsis']
+            if tx.get('maxLines'): css += ['display: -webkit-box', '-webkit-box-orient: vertical', f"-webkit-line-clamp: {tx['maxLines']}"]
+        spans = []
+        for r in tx['runs']:
+            extra = run_css(r, base)
+            t = html.escape(r['text'])
+            spans.append(f'<span style="{"; ".join(extra)}">{t}</span>' if extra else t)
+        inner = f"<span>{''.join(spans)}</span>"
+    else:
+        if lay and lay.get('reverseZ'):   # "first on top": earlier children paint above later ones
+            for i, c in enumerate(m['children']): c['_z'] = len(m['children']) - i
+        parts = [to_html(c, m, depth + 1) for c in m['children']]
+        inner = ('\n' + '\n'.join(parts) + '\n' + '  ' * depth) if parts else ''
+    CSS.append(f"/* {m['name']} */ .{cls} {{ {'; '.join(c for c in css if c)}; }}")
+    return f'{"  " * depth}<div{attrs}>{inner}</div>'
+
+# ---------------------------------------------------------------- tree.txt
+def tree_line(m):
+    b = [f"{fmt(round(m['w'], 2))}x{fmt(round(m['h'], 2))}"]
+    if m['x'] or m['y']: b.append(f"@{fmt(round(m['x'], 2))},{fmt(round(m['y'], 2))}")
+    if m['rotation']: b.append(f"rot={fmt(m['rotation'])}°")
+    l = m.get('layout')
+    if l:
+        al = [l['dir']]
+        if l['gap'] and l['justify'] not in ('SPACE_EVENLY', 'SPACE_BETWEEN'): al.append(f"gap={fmt(l['gap'])}")
+        if any(l['pad']): al.append('pad=' + ' '.join(fmt(p) for p in l['pad']))
+        if l['justify'] != 'MIN': al.append('justify=' + JUST.get(l['justify'], l['justify']).replace('flex-', ''))
+        if l['align'] != 'MIN': al.append('align=' + ALIGN.get(l['align'], l['align']).replace('flex-', ''))
+        if l['wrap']: al.append('wrap')
+        sz = {'FIXED': 'fixed'}.get(l['primarySizing'], 'hug') + '/' + {'FIXED': 'fixed'}.get(l['counterSizing'], 'hug')
+        al.append(f'size={sz}')
+        b.append('[' + ' '.join(al) + ']')
+    ch = m.get('child', {})
+    for k in ('grow', 'stretch', 'absolute'):
+        if ch.get(k): b.append({'grow': 'fill-main', 'stretch': 'fill-cross', 'absolute': 'absolute'}[k])
+    pf = lambda p: (f"{p['color']}({p['token']})" if p.get('token') else p['color']) if p['type'] == 'solid' else (p.get('css') or f"image:{p.get('hash')}" if p['type'] != 'image' else f"image:{p['hash']}({p['scale'].lower()})")
+    if m.get('fills'): b.append('bg=' + ','.join(pf(p) for p in m['fills']))
+    st = m.get('stroke')
+    if st:
+        sides = f"sides={'/'.join(fmt(x) for x in st['sides'])}" if st.get('sides') else f"{fmt(st['weight'])}"
+        b.append(f"border={sides} {st['align'].lower()} {','.join(pf(p) for p in st['paints'])}" + (' dashed' if st.get('dash') else ''))
+    if m.get('radius'): b.append('radius=' + ('/'.join(fmt(x) for x in m['radius']) if len(set(m['radius'])) > 1 else fmt(m['radius'][0])))
+    for e in m.get('effects', []):
+        if e['type'] in ('drop', 'inner'): b.append(f"{'inner-' if e['type'] == 'inner' else ''}shadow={fmt(e['x'])},{fmt(e['y'])} blur={fmt(e['blur'])} spread={fmt(e['spread'])} {e['color']}" + (f"({e['token']})" if e.get('token') else ''))
+        else: b.append(f"{e['type']}={fmt(e['radius'])}")
+    if m.get('opacity') is not None: b.append(f"opacity={fmt(m['opacity'])}")
+    if m.get('clip'): b.append('clip')
+    if m['type'] == 'TEXT':
+        t = m['text']; r = t['runs'][0] if t['runs'] else t
+        b.append(f"font={r['family']} {r['weight']}{' italic' if r['italic'] else ''} {fmt(r['size'])}/{lh_css(r['lineHeight'], r['size'])}")
+        ls = ls_css(r['letterSpacing'])
+        if ls: b.append(f'ls={ls}')
+        if t['alignH'] != 'LEFT': b.append('text-align=' + t['alignH'].lower())
+        if t['alignV'] != 'TOP': b.append('v-align=' + t['alignV'].lower())
+        b.append('resize=' + {'WIDTH_AND_HEIGHT': 'hug', 'HEIGHT': 'fixed-w', 'NONE': 'fixed'}.get(t['autoResize'], t['autoResize']))
+        if r['fills']: b.append('color=' + ','.join(pf(p) for p in r['fills']))
+        if len(t['runs']) > 1: b.append(f"runs={len(t['runs'])}")
+        b.append(json.dumps(t['characters'][:300], ensure_ascii=False))
+    return ' '.join(b)
+
+def tree(m, depth=0, out=None):
+    out = out if out is not None else []
+    label = f"<{m['name']}> instance of “{m['component']}”" if m.get('component') else f"{m['type'].lower()} “{m['name']}”"
+    extra = f" icon→assets/icons/{m['_icon']}" if m.get('_icon') else ''
+    out.append('  ' * depth + f"{label} {tree_line(m)}{extra}")
+    if not m.get('icon'):
+        for c in m['children']: tree(c, depth + 1, out)
+    return out
+
+# ---------------------------------------------------------------- run
+root = resolve(byid[ROOT])
+M = model(root)
+os.makedirs(f'{OUT}/assets/icons', exist_ok=True); os.makedirs(f'{OUT}/assets/images', exist_ok=True)
+body = to_html(M)
+for fn, svg in ICONS.items(): open(f'{OUT}/assets/icons/{fn}', 'w').write(svg)
+
+def mark_icons(m):
+    if m.get('icon') and m['type'] != 'TEXT':
+        svg = svg_doc(m); m['_icon'] = next((f for f, s in ICONS.items() if s == svg), None)
+    for c in m['children']: mark_icons(c)
+mark_icons(M)
+
+missing = []
+urls = META.get('imageHashes', {})
+for hsh in sorted(IMAGES):
+    dst = f'{OUT}/assets/images/{hsh}.png'
+    if os.path.exists(dst): continue
+    if hsh not in urls and not urls.get('__api_done'):
+        # Fallback: REST "image fills" is Tier 2 (per-minute quota even on View seats), unlike GET file (Tier 1).
+        urls['__api_done'] = True
+        tok = os.environ.get('FIGMA_API_KEY') or os.environ.get('FIGMA_ACCESS_TOKEN')
+        if tok and META.get('fileKey'):
+            try:
+                req = urllib.request.Request(f"https://api.figma.com/v1/files/{META['fileKey']}/images", headers={'X-Figma-Token': tok})
+                urls.update(json.load(urllib.request.urlopen(req, timeout=30)).get('meta', {}).get('images', {}))
+            except Exception as e: missing.append(f'image-fills API: {e}')
+    if hsh in urls:
+        try: urllib.request.urlretrieve(urls[hsh], dst)
+        except Exception as e: missing.append(f'{hsh}: {e}')
+    else: missing.append(hsh)
+
+tokens = {name: {'type': v.get('variableResolvedType'), 'css': css_var(name), 'values': var_value(v)} for name, v in sorted(USED_TOKENS.items())}
+json.dump(tokens, open(f'{OUT}/tokens.json', 'w'), indent=1, ensure_ascii=False)
+for name, col in PAINTED.items():
+    if name in tokens: tokens[name]['painted'] = col
+json.dump(tokens, open(f'{OUT}/tokens.json', 'w'), indent=1, ensure_ascii=False)
+root_vars = '\n'.join(f"  {css_var(n)}: {c};" for n, c in sorted(PAINTED.items()))
+
+fonts = []
+for fam, ws in HTML_FONTS.items():
+    if not fam: continue
+    spec = ';'.join(sorted({f"{int(i)},{w}" for w, i in ws}))
+    fonts.append(f"family={fam.replace(' ', '+')}:ital,wght@{spec}")
+font_link = f'<link rel="stylesheet" href="https://fonts.googleapis.com/css2?{"&".join(fonts)}&display=block">' if fonts else ''
+
+page = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>{html.escape(M['name'])}</title>
+{font_link}
+<style>
+:root {{
+{root_vars}
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ background: transparent; -webkit-font-smoothing: antialiased; }}
+svg {{ display: block; overflow: visible; }}
+{chr(10).join(CSS)}
+</style></head>
+<body>
+{body}
+</body></html>
+"""
+open(f'{OUT}/index.html', 'w').write(page)
+json.dump(M, open(f'{OUT}/model.json', 'w'), ensure_ascii=False)
+open(f'{OUT}/tree.txt', 'w').write('\n'.join(tree(M)) + '\n')
+print(json.dumps({'nodes': sum(1 for _ in walk_all(M)) + 1, 'icons': len(ICONS), 'images': len(IMAGES), 'images_missing': missing,
+                  'tokens': len(tokens), 'fonts': sorted(HTML_FONTS), 'w': M['w'], 'h': M['h']}))

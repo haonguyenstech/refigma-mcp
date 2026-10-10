@@ -18,5 +18,5 @@ done
 sleep 8   # let the scene + selection settle
 node "$D/lib/copy.mjs" "$OUT"
 (cd "$D" && node lib/decode.mjs "$OUT/clip.html" "$OUT/msg.json" | grep -v '^meta:')
-python3 "$D/lib/tree.py" "$OUT/msg.json" "$NODE" > "$OUT/tree.txt"
-echo "OK → $OUT/tree.txt ($(wc -l < "$OUT/tree.txt") lines)$( [[ -f $OUT/frame.png ]] && echo ", frame.png")"
+python3 "$D/lib/extract.py" "$OUT/msg.json" "$NODE" "$OUT" > "$OUT/extract.json"
+echo "OK → $OUT  $(cat "$OUT/extract.json")"
