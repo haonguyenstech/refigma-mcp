@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
 # figma-read <figma design URL with node-id> [outdir]
-# Opens the link in the debug Edge (CDP :9222, already logged in to figma.com), copies the selected node,
-# decodes Figma's clipboard binary locally and writes tree.txt (+ frame.png, msg.json). No REST API, no quota.
+# Opens the link in the logged-in debug Edge (CDP :9222) with FigmaAgent blocked (no Figma Desktop pop-up),
+# records the page document, copies the node, decodes Figma's clipboard binary locally and writes
+# tree.txt, index.html, <Component>.tsx, assets/, tokens.json (+ frame.png). No REST API, no quota.
 set -euo pipefail
 URL="$1"; D="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 NODE=$(python3 -c "import sys,urllib.parse as u;q=u.parse_qs(u.urlparse(sys.argv[1]).query);print(q['node-id'][0].replace('-',':'))" "$URL")
-FILE=$(python3 -c "import sys,re;print(re.search(r'/(?:design|file)/([A-Za-z0-9]+)',sys.argv[1]).group(1))" "$URL")
-OUT="${2:-$HOME/.figma-local/out/$FILE/${NODE//:/-}}"; mkdir -p "$OUT"
+FILE=$(python3 -c "import sys,re;print(re.search(r'/(?:design|file|proto)/([A-Za-z0-9]+)',sys.argv[1]).group(1))" "$URL")
+FDIR="$HOME/.figma-local/out/$FILE"
+OUT="${2:-$FDIR/${NODE//:/-}}"; mkdir -p "$OUT"
 curl -s -m2 http://127.0.0.1:9222/json/version >/dev/null || bash ~/.claude/skills/agent-browser-connect/connect.sh >/dev/null
-CLEAN=$(python3 -c "import sys,urllib.parse as u;p=u.urlparse(sys.argv[1]);print(f'{p.scheme}://{p.netloc}{p.path}?node-id='+sys.argv[2].replace(':','-'))" "$URL" "$NODE")
-agent-browser --cdp 9222 open "$CLEAN" >/dev/null
-for i in $(seq 1 40); do
-  S=$(agent-browser --cdp 9222 eval "(()=>{const b=[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Open here instead'));if(b){b.click();return 'clicked'}return document.querySelectorAll('canvas').length?'canvas':'wait'})()" 2>/dev/null | tr -d '"')
-  [[ "$S" == canvas ]] && break; sleep 1
-done
-[[ "$S" == canvas ]] || { echo "editor did not load (logged out? run import-cookie for figma.com)" >&2; exit 1; }
-sleep 8   # let the scene + selection settle
-node "$D/lib/copy.mjs" "$OUT"
-(cd "$D" && node lib/decode.mjs "$OUT/clip.html" "$OUT/msg.json" | grep -v '^meta:')
+node "$D/lib/capture.mjs" "$URL" "$FDIR/_doc/_new" "$OUT"
+node "$D/lib/doc.mjs" ingest "$FDIR" >/dev/null || echo "warning: document ingest failed" >&2
+(cd "$D" && node lib/decode.mjs "$OUT/clip.html" "$OUT/msg.json" >/dev/null)
 python3 "$D/lib/extract.py" "$OUT/msg.json" "$NODE" "$OUT" > "$OUT/extract.json"
 echo "OK → $OUT  $(cat "$OUT/extract.json")"

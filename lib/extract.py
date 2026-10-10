@@ -168,7 +168,8 @@ VISUAL = ('fillPaints', 'strokePaints', 'strokeWeight', 'strokeAlign', 'strokeJo
           'cornerRadius', 'rectangleCornerRadiiIndependent', 'rectangleTopLeftCornerRadius', 'rectangleTopRightCornerRadius',
           'rectangleBottomLeftCornerRadius', 'rectangleBottomRightCornerRadius', 'effects', 'opacity', 'frameMaskDisabled',
           'stackMode', 'stackSpacing', 'stackHorizontalPadding', 'stackVerticalPadding', 'stackPaddingRight', 'stackPaddingBottom',
-          'stackPrimaryAlignItems', 'stackCounterAlignItems', 'stackPrimarySizing', 'stackCounterSizing', 'stackWrap', 'stackCounterSpacing')
+          'stackPrimaryAlignItems', 'stackCounterAlignItems', 'stackPrimarySizing', 'stackCounterSizing', 'stackWrap', 'stackCounterSpacing',
+          'prototypeInteractions')
 
 def apply_ov(n, ov):
     if not ov: return n
@@ -309,6 +310,54 @@ def vector_paths(n):
     if not fills and ns: fills = [{'d': stroke, 'rule': 'nonzero'}]
     return fills, stroke
 
+# ---------------------------------------------------------------- FigJam (pre-tessellated geometry)
+def commands_path(i, sx=1.0, sy=1.0, dx=0.0, dy=0.0):
+    """Figma path commands blob: u8 op (0 close, 1 move, 2 line, 3 quad, 4 cubic) + f32 coordinates."""
+    raw = blob(i); o = 0; d = []
+    f = lambda v: f'{v:.2f}'.rstrip('0').rstrip('.')
+    pt = lambda x, y: f'{f(x * sx + dx)} {f(y * sy + dy)}'
+    while o < len(raw):
+        op = raw[o]; o += 1
+        if op == 0: d.append('Z')
+        elif op in (1, 2):
+            x, y = struct.unpack_from('<ff', raw, o); o += 8; d.append(('M' if op == 1 else 'L') + pt(x, y))
+        elif op == 3:
+            x1, y1, x, y = struct.unpack_from('<4f', raw, o); o += 16; d.append(f'Q{pt(x1, y1)} {pt(x, y)}')
+        elif op == 4:
+            x1, y1, x2, y2, x, y = struct.unpack_from('<6f', raw, o); o += 24; d.append(f'C{pt(x1, y1)} {pt(x2, y2)} {pt(x, y)}')
+        else: break
+    return ''.join(d)
+
+FIGJAM_DEFAULT_TEXT = {'r': 0.11, 'g': 0.11, 'b': 0.11, 'a': 1}
+def figjam_svg(n):
+    """SVG for FigJam nodes (shape-with-text, connector, sticky...) from derivedImmutableFrameData geometry + glyph outlines."""
+    gen = {tuple(g(x) for x in ov['guidPath']['guids']): ov for ov in (n.get('nodeGenerationData') or {}).get('overrides', [])}
+    out = []
+    for ov in (n.get('derivedImmutableFrameData') or {}).get('overrides', []):
+        key = tuple(g(x) for x in ov['guidPath']['guids'])
+        st = gen.get(key, {})
+        if st.get('visible') is False: continue
+        t = ov.get('transform') or {}
+        part = []
+        fill = next((rgba(p['color'], p.get('opacity', 1)) for p in st.get('fillPaints') or [] if p.get('visible', True) and p['type'] == 'SOLID'), None)
+        stroke = next((rgba(p['color'], p.get('opacity', 1)) for p in st.get('strokePaints') or [] if p.get('visible', True) and p['type'] == 'SOLID'), None)
+        if ov.get('derivedTextData'):
+            # text sub-node: fillPaints colour the glyphs; strokeGeometry here is the text box outline, not drawn
+            col = fill or rgba(FIGJAM_DEFAULT_TEXT)
+            gl = []
+            for gph in ov['derivedTextData'].get('glyphs', []):
+                if 'commandsBlob' not in gph: continue
+                fs_ = gph.get('fontSize', 16); pos = gph['position']
+                gl.append(commands_path(gph['commandsBlob'], fs_, -fs_, pos['x'], pos['y']))
+            if gl: part.append(f'<path d="{"".join(gl)}" fill="{col}"/>')
+        else:
+            for fg in ov.get('fillGeometry') or []:
+                if fill: part.append(f'<path d="{commands_path(fg["commandsBlob"])}" fill="{fill}" fill-rule="{"evenodd" if fg.get("windingRule") == "ODD" else "nonzero"}"/>')
+            for sg in ov.get('strokeGeometry') or []:
+                if stroke: part.append(f'<path d="{commands_path(sg["commandsBlob"])}" fill="{stroke}"/>')
+        if part: out.append(f'<g transform="translate({fmt(t.get("m02", 0))} {fmt(t.get("m12", 0))})">' + ''.join(part) + '</g>')
+    return ''.join(out)
+
 # ---------------------------------------------------------------- normalized model
 WEIGHTS = {'thin': 100, 'hairline': 100, 'extralight': 200, 'ultralight': 200, 'light': 300, 'regular': 400, 'normal': 400, 'book': 400,
            'medium': 500, 'semibold': 600, 'demibold': 600, 'bold': 700, 'extrabold': 800, 'ultrabold': 800, 'black': 900, 'heavy': 900}
@@ -316,6 +365,39 @@ def font_weight(style):
     s = (style or '').lower().replace(' ', '').replace('-', '').replace('italic', '')
     return WEIGHTS.get(s, 400)
 
+STYLES = {}   # style key / guid -> style name ("Text sm/Semibold", "Shadows/shadow-xs", ...)
+for _n in N:
+    if _n.get('styleType'):
+        STYLES[g(_n['guid'])] = _n.get('name')
+        if _n.get('key'): STYLES[_n['key']] = _n.get('name')
+
+def style_key(ref):
+    if not ref: return None
+    if 'assetRef' in ref: return ref['assetRef'].get('key')
+    if 'guid' in ref and ref['guid'].get('sessionID') != 4294967295: return g(ref['guid'])
+
+def annotations_of(n):
+    out = []
+    for a in n.get('annotations') or []:
+        label = a.get('label') or a.get('labelMarkdown') or ''
+        props = [p.get('type', '').lower() for p in a.get('properties') or [] if p.get('type')]
+        if label or props: out.append({'label': label, 'properties': props})
+    return out
+
+def interactions_of(n):
+    out = []
+    for it in n.get('prototypeInteractions') or []:
+        if it.get('isDeleted'): continue
+        ev = (it.get('event') or {}).get('interactionType', '')
+        for a in it.get('actions') or []:
+            tgt = g(a['transitionNodeID']) if a.get('transitionNodeID') else None
+            out.append({'event': ev, 'nav': a.get('navigationType') or a.get('connectionType', ''), 'target': tgt,
+                        'targetName': (byid.get(tgt) or {}).get('name') if tgt else None, 'url': a.get('connectionURL'),
+                        'transition': a.get('transitionType'), 'duration': a.get('transitionDuration'), 'easing': a.get('easingType'),
+                        'delay': (it.get('event') or {}).get('transitionTimeout')})
+    return out
+
+HOVER_DEPTH = []
 VECTORISH = {'VECTOR', 'BOOLEAN_OPERATION', 'ELLIPSE', 'STAR', 'REGULAR_POLYGON', 'LINE', 'RECTANGLE', 'ROUNDED_RECTANGLE'}
 ICONS, IMAGES = {}, set()
 
@@ -396,6 +478,26 @@ def _model(n, parent_layout=None):
     effs = [e for e in (effect(e) for e in n.get('effects') or []) if e]
     if effs: m['effects'] = effs
     if t in ('FRAME', 'INSTANCE', 'SYMBOL') and not n.get('frameMaskDisabled', False): m['clip'] = True
+    st_names = {k: STYLES.get(style_key(n.get(f))) for k, f in (('text', 'styleIdForText'), ('fill', 'styleIdForFill'),
+                                                               ('stroke', 'styleIdForStrokeFill'), ('effect', 'styleIdForEffect'))}
+    st_names = {k: v for k, v in st_names.items() if v}
+    if st_names: m['styles'] = st_names
+    ann = annotations_of(n)
+    if ann: m['annotations'] = ann
+    acts = interactions_of(n)
+    if acts: m['interactions'] = acts
+    hov = next((a['target'] for a in acts if a['event'] == 'ON_HOVER' and a['nav'] in ('SWAP_STATE', 'CHANGE_TO') and a.get('target')), None)
+    if hov and t == 'INSTANCE' and hov in byid and not HOVER_DEPTH:
+        HOVER_DEPTH.append(1)
+        try:
+            fake = {k: v for k, v in n.items() if k not in ('_children', 'overriddenSymbolID', 'prototypeInteractions')}
+            fake['symbolData'] = {**(n.get('symbolData') or {}), 'symbolID': byid[hov]['guid']}
+            fake['_explicit'] = set()
+            fake.pop('_component', None)
+            hm = model(resolve(fake), parent_layout)
+            if hm: m['hover'] = hm
+        finally: HOVER_DEPTH.pop()
+    if n.get('derivedImmutableFrameData'): m['figjam'] = figjam_svg(n)
     if t == 'TEXT': m['text'] = text_model(n)
     if t == 'VECTOR': m['paths'], m['strokePath'] = vector_paths(n)
     if t == 'BOOLEAN_OPERATION': m['boolean'] = n.get('booleanOperation', 'UNION')
@@ -406,6 +508,7 @@ def _model(n, parent_layout=None):
     plain = not (m.get('fills') or m.get('layout') or m.get('effects') or m.get('stroke'))
     if t not in ('TEXT',) and plain and m['children'] and all_vector(m): m['icon'] = True
     elif t in VECTORISH and t not in ('RECTANGLE', 'ROUNDED_RECTANGLE', 'LINE'): m['icon'] = True
+    if m.get('figjam') is not None: m['icon'] = True; m['children'] = []
     return m
 
 def all_vector(m):
@@ -453,6 +556,8 @@ def svg_node(m, defs, top=False):
         if st.get('cap') and st['cap'] != 'NONE': sattr += f' stroke-linecap="{ {"ROUND": "round", "SQUARE": "square"}.get(st["cap"], "butt") }"'
         if st.get('join'): sattr += f' stroke-linejoin="{st["join"].lower()}"'
         if st.get('dash'): sattr += f' stroke-dasharray="{" ".join(fmt(x) for x in st["dash"])}"'
+    if m.get('figjam') is not None:
+        return f'<g{tf}{op}>{m["figjam"]}</g>'
     if t == 'VECTOR':
         out = []
         for p in m.get('paths', []):
@@ -585,10 +690,26 @@ def effects_shadow(m):
 JUST = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end', 'SPACE_EVENLY': 'space-between', 'SPACE_BETWEEN': 'space-between'}
 ALIGN = {'MIN': 'flex-start', 'CENTER': 'center', 'MAX': 'flex-end', 'BASELINE': 'baseline'}
 
-def to_html(m, parent=None, depth=0):
-    seq[0] += 1
-    cls = f'n{seq[0]}'
+def visual_decls(m):
+    """Paint-related declarations only (used for :hover diffs)."""
     css = []
+    if m['type'] == 'TEXT':
+        r = m['text']['runs'][0] if m['text']['runs'] else m['text']
+        css += [d for d in run_css(r) if d.startswith(('color', 'background'))]
+        return css
+    if m.get('fills'): css.append(bg_css(m['fills']).rstrip(';'))
+    elif m.get('hover_base_had_fill'): css.append('background: transparent')
+    sh = shadow_css(m)
+    css.append('box-shadow: ' + (', '.join(sh) if sh else 'none'))
+    if id(m) in OUTLINE: css.extend(OUTLINE[id(m)].split('; '))
+    if m.get('opacity') is not None: css.append(f"opacity: {fmt(m['opacity'])}")
+    return css
+
+def build(m, parent=None):
+    seq[0] += 1
+    el = {'cls': f'n{seq[0]}', 'm': m, 'css': [], 'before': None, 'svg': None, 'icon': None, 'spans': None, 'children': [], 'hover': []}
+    m['_cls'] = el['cls']
+    css = el['css']
     pl = (parent or {}).get('layout')
     ch = m.get('child', {})
     in_flow = pl and not ch.get('absolute')
@@ -616,45 +737,40 @@ def to_html(m, parent=None, depth=0):
         v = (m.get(k) or {}).get('value') or {}
         if v.get('x') is not None: css.append(f"{prop}-width: {fmt(v['x'])}px")
         if v.get('y') is not None: css.append(f"{prop}-height: {fmt(v['y'])}px")
-    attrs = f' class="{cls}" data-name="{html.escape(m["name"])}"' + (f' data-component="{html.escape(m["component"])}"' if m.get('component') else '')
 
     if m.get('icon') and m['type'] != 'TEXT':
-        fn, svg = icon_file(m)
-        CSS.append(f".{cls} {{ {'; '.join(css)}; }}")
-        return f'{"  " * depth}<div{attrs} data-icon="assets/icons/{fn}">{svg}</div>'
+        el['icon'], el['svg'] = icon_file(m)
+        return el
 
     if m.get('fills'): css.append(bg_css(m['fills']).rstrip(';'))
     if m.get('radius'):
         r = m['radius']; css.append('border-radius: ' + (f'{fmt(r[0])}px' if len(set(r)) == 1 else ' '.join(f'{fmt(x)}px' for x in r)))
     sh = shadow_css(m)
     if sh: css.append('box-shadow: ' + ', '.join(sh))
-    if id(m) in OUTLINE: css.append(OUTLINE[id(m)])
+    if id(m) in OUTLINE: css.extend(OUTLINE[id(m)].split('; '))
     st = m.get('stroke')
-    if st and st['paints'][0]['type'] != 'solid' and 'css' in st['paints'][0] and not m.get('icon'):
+    if st and st['paints'][0]['type'] != 'solid' and 'css' in st['paints'][0]:
         w_ = st['weight']; inset = {'INSIDE': 0, 'CENTER': -w_ / 2, 'OUTSIDE': -w_}.get(st['align'], 0)
-        CSS.append(f".{cls}::before {{ content: ''; position: absolute; inset: {fmt(inset)}px; border-radius: inherit; padding: {fmt(w_)}px; "
-                   f"background: {st['paints'][0]['css']}; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); "
-                   f"-webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none; }}")
-        if parent is None or not in_flow: pass
+        el['before'] = ["content: ''", 'position: absolute', f'inset: {fmt(inset)}px', 'border-radius: inherit', f'padding: {fmt(w_)}px',
+                        f"background: {st['paints'][0]['css']}", '-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
+                        '-webkit-mask-composite: xor', 'mask-composite: exclude', 'pointer-events: none']
     for e in m.get('effects', []):
         if e['type'] == 'blur': css.append(f"filter: blur({fmt(e['radius'] / 2)}px)")
         if e['type'] == 'bg-blur': css.append(f"backdrop-filter: blur({fmt(e['radius'] / 2)}px)")
     if m.get('clip'): css.append('overflow: hidden')
     if m['type'] == 'ELLIPSE': css.append('border-radius: 50%')
     if m['type'] == 'LINE' and m.get('stroke'):
-        css += [f"height: 0", f"border-top: {fmt(m['stroke']['weight'])}px solid {color_css(m['stroke']['paints'][0])}"]
+        css += ['height: 0', f"border-top: {fmt(m['stroke']['weight'])}px solid {color_css(m['stroke']['paints'][0])}"]
     lay = m.get('layout')
     if lay:
         css += ['display: flex', f"flex-direction: {'row' if lay['dir'] == 'row' else 'column'}",
-                f"justify-content: {JUST.get(lay['justify'], 'flex-start')}", f"align-items: {ALIGN.get(lay['align'], 'flex-start')}",
-                'box-sizing: border-box']
+                f"justify-content: {JUST.get(lay['justify'], 'flex-start')}", f"align-items: {ALIGN.get(lay['align'], 'flex-start')}"]
         if lay['justify'] not in ('SPACE_EVENLY', 'SPACE_BETWEEN') and lay['gap']: css.append(f"gap: {fmt(lay['gap'])}px")
         if lay['wrap']:
             css.append('flex-wrap: wrap')
             if lay.get('counterGap'): css.append(f"row-gap: {fmt(lay['counterGap'])}px" if lay['dir'] == 'row' else f"column-gap: {fmt(lay['counterGap'])}px")
         if any(lay['pad']): css.append('padding: ' + ' '.join(f'{fmt(p)}px' for p in lay['pad']))
 
-    inner = ''
     if m['type'] == 'TEXT':
         tx = m['text']
         base = tx['runs'][0] if tx['runs'] else tx
@@ -662,23 +778,129 @@ def to_html(m, parent=None, depth=0):
         css += run_css(base)
         css.append('text-align: ' + {'LEFT': 'left', 'CENTER': 'center', 'RIGHT': 'right', 'JUSTIFIED': 'justify'}[tx['alignH']])
         css.append('white-space: ' + ('pre' if tx['autoResize'] == 'WIDTH_AND_HEIGHT' else 'pre-wrap'))
-        if tx['autoResize'] == 'HEIGHT' and parent is not None and not ch.get('stretch'): pass
         if tx['truncate']:
             css += ['overflow: hidden', 'text-overflow: ellipsis']
             if tx.get('maxLines'): css += ['display: -webkit-box', '-webkit-box-orient: vertical', f"-webkit-line-clamp: {tx['maxLines']}"]
-        spans = []
-        for r in tx['runs']:
-            extra = run_css(r, base)
-            t = html.escape(r['text'])
-            spans.append(f'<span style="{"; ".join(extra)}">{t}</span>' if extra else t)
-        inner = f"<span>{''.join(spans)}</span>"
+        el['spans'] = [(r['text'], run_css(r, base)) for r in tx['runs']]
     else:
         if lay and lay.get('reverseZ'):   # "first on top": earlier children paint above later ones
             for i, c in enumerate(m['children']): c['_z'] = len(m['children']) - i
-        parts = [to_html(c, m, depth + 1) for c in m['children']]
-        inner = ('\n' + '\n'.join(parts) + '\n' + '  ' * depth) if parts else ''
-    CSS.append(f"/* {m['name']} */ .{cls} {{ {'; '.join(c for c in css if c)}; }}")
-    return f'{"  " * depth}<div{attrs}>{inner}</div>'
+        el['children'] = [build(c, m) for c in m['children']]
+    if m.get('hover'):
+        hover_rules(el, m, m['hover'])
+        a = next((a for a in m.get('interactions', []) if a['event'] == 'ON_HOVER'), {})
+        if a.get('duration'):
+            ease = {'LINEAR': 'linear', 'EASE_IN': 'ease-in', 'EASE_OUT': 'ease-out', 'EASE_IN_AND_OUT': 'ease-in-out',
+                    'EASE_IN_BACK': 'cubic-bezier(0.3,-0.05,0.7,-0.5)', 'EASE_OUT_BACK': 'cubic-bezier(0.45,1.45,0.8,1)'}.get(a.get('easing'), 'ease')
+            el['transition'] = f"{round(a['duration'] * 1000)}ms {ease}"
+    return el
+
+def hover_rules(root_el, base, hov):
+    """Pair the default and hover variants node by node and emit paint changes as :hover rules."""
+    def pair(a, b, chain):
+        if not b: return
+        if a.get('fills') and not b.get('fills'): b['hover_base_had_fill'] = True
+        va, vb = visual_decls(a), visual_decls(b)
+        if va != vb and a.get('_cls'):
+            changed = [d for d in vb if d not in va]
+            if changed: root_el['hover'].append((a['_cls'] if a is not base else None, changed))
+        for ca, cb in zip(a.get('children', []), b.get('children', [])):
+            if ca['name'] == cb['name'] and ca['type'] == cb['type']: pair(ca, cb, chain + [ca['name']])
+    pair(base, hov, [])
+
+# ---- HTML renderer
+def render_html(el, depth=0):
+    m = el['m']
+    attrs = f' class="{el["cls"]}" data-id="{m["id"]}" data-name="{html.escape(m["name"])}"'
+    if m.get('component'): attrs += f' data-component="{html.escape(m["component"])}"'
+    for a in m.get('interactions', []):
+        if a['event'] != 'ON_HOVER': attrs += f' data-{a["event"].lower().replace("_", "-")}="{html.escape((a["nav"] or "").lower())}:{a.get("target") or a.get("url") or ""}"'
+    CSS.append(f"/* {m['name']} */ .{el['cls']} {{ {'; '.join(c for c in el['css'] if c)}; }}")
+    if el['before']: CSS.append(f".{el['cls']}::before {{ {'; '.join(el['before'])}; }}")
+    for cls, decls in el['hover']:
+        sel = f".{el['cls']}:hover" + (f" .{cls}" if cls else '')
+        CSS.append(f"{sel} {{ {'; '.join(decls)}; }}")
+    if el['hover']:
+        tr = f"; transition: background {el['transition']}, color {el['transition']}, box-shadow {el['transition']}, outline-color {el['transition']}, opacity {el['transition']}" if el.get('transition') else ''
+        targets = ', '.join([f".{el['cls']}"] + [f".{el['cls']} .{c}" for c, _ in el['hover'] if c])
+        CSS.append(f"{targets} {{ cursor: pointer{tr}; }}")
+    pad = '  ' * depth
+    if el['svg'] is not None:
+        return f'{pad}<div{attrs} data-icon="assets/icons/{el["icon"]}">{el["svg"]}</div>'
+    if el['spans'] is not None:
+        inner = ''.join(f'<span style="{"; ".join(d)}">{html.escape(t)}</span>' if d else html.escape(t) for t, d in el['spans'])
+        return f'{pad}<div{attrs}><span>{inner}</span></div>'
+    if not el['children']: return f'{pad}<div{attrs}></div>'
+    return f'{pad}<div{attrs}>\n' + '\n'.join(render_html(c, depth + 1) for c in el['children']) + f'\n{pad}</div>'
+
+# ---- React + Tailwind renderer
+TW_KEYWORD = {
+    ('display', 'flex'): 'flex', ('display', '-webkit-box'): '[display:-webkit-box]', ('flex-direction', 'row'): 'flex-row', ('flex-direction', 'column'): 'flex-col',
+    ('justify-content', 'flex-start'): 'justify-start', ('justify-content', 'center'): 'justify-center', ('justify-content', 'flex-end'): 'justify-end',
+    ('justify-content', 'space-between'): 'justify-between', ('align-items', 'flex-start'): 'items-start', ('align-items', 'center'): 'items-center',
+    ('align-items', 'flex-end'): 'items-end', ('align-items', 'baseline'): 'items-baseline', ('align-self', 'stretch'): 'self-stretch',
+    ('position', 'relative'): 'relative', ('position', 'absolute'): 'absolute', ('overflow', 'hidden'): 'overflow-hidden',
+    ('flex', '1 1 0'): 'flex-[1_1_0]', ('flex', '0 0 auto'): 'flex-none', ('flex-wrap', 'wrap'): 'flex-wrap',
+    ('white-space', 'pre'): 'whitespace-pre', ('white-space', 'pre-wrap'): 'whitespace-pre-wrap', ('text-align', 'left'): 'text-left',
+    ('text-align', 'center'): 'text-center', ('text-align', 'right'): 'text-right', ('text-align', 'justify'): 'text-justify',
+    ('font-style', 'italic'): 'italic', ('text-transform', 'uppercase'): 'uppercase', ('text-transform', 'lowercase'): 'lowercase',
+    ('text-transform', 'capitalize'): 'capitalize', ('text-decoration', 'underline'): 'underline', ('text-decoration', 'line-through'): 'line-through',
+    ('transform-origin', '0 0'): 'origin-top-left', ('text-overflow', 'ellipsis'): 'text-ellipsis', ('cursor', 'pointer'): 'cursor-pointer',
+    ('pointer-events', 'none'): 'pointer-events-none', ('box-shadow', 'none'): 'shadow-none',
+}
+TW_PREFIX = {'width': 'w', 'height': 'h', 'min-width': 'min-w', 'max-width': 'max-w', 'min-height': 'min-h', 'max-height': 'max-h',
+             'left': 'left', 'top': 'top', 'gap': 'gap', 'row-gap': 'gap-y', 'column-gap': 'gap-x', 'padding': 'p', 'border-radius': 'rounded',
+             'opacity': 'opacity', 'z-index': 'z', 'font-size': 'text', 'line-height': 'leading', 'letter-spacing': 'tracking',
+             'font-weight': 'font', 'box-shadow': 'shadow', 'inset': 'inset', 'outline-offset': 'outline-offset'}
+def tw_val(v): return v.replace('_', '\\_').replace(' ', '_')
+def tw(decls, variant=''):
+    out = []
+    for d in decls:
+        if not d: continue
+        prop, _, val = d.partition(':'); prop, val = prop.strip(), val.strip()
+        if (prop, val) in TW_KEYWORD: out.append(variant + TW_KEYWORD[(prop, val)]); continue
+        if prop == 'color': out.append(f'{variant}text-[color:{tw_val(val)}]'); continue
+        if prop == 'background' and (val.startswith(('#', 'rgba', 'var(')) and ',' not in val.split('(')[0]) and 'gradient' not in val and 'url(' not in val:
+            out.append(f'{variant}bg-[{tw_val(val)}]'); continue
+        if prop == 'transform' and val.startswith('rotate('): out.append(f'{variant}rotate-[{val[7:-1]}]'); continue
+        if prop in TW_PREFIX and not (prop == 'font-weight' and not val.isdigit()):
+            out.append(f'{variant}{TW_PREFIX[prop]}-[{tw_val(val)}]'); continue
+        out.append(f'{variant}[{prop}:{tw_val(val)}]')
+    return ' '.join(out)
+
+SVG_ATTR = re.compile(r'\s([a-z]+(?:-[a-z]+)+)=')
+def svg_jsx(svg):
+    svg = SVG_ATTR.sub(lambda mm: ' ' + re.sub(r'-([a-z])', lambda x: x.group(1).upper(), mm.group(1)) + '=', svg)
+    return svg.replace(' class=', ' className=')
+
+def jsx_text(t): return '{' + json.dumps(t, ensure_ascii=False) + '}'
+
+def render_jsx(el, depth, group=None):
+    m = el['m']
+    cls = tw(el['css'])
+    if el['before']: cls += ' ' + tw(el['before'], 'before:')
+    gname = None
+    if el['hover']:
+        gname = el['cls']
+        cls += f' group/{gname} cursor-pointer'
+        if el.get('transition'):
+            dur, ease = el['transition'].split(' ', 1)
+            cls += f' transition-all [transition-duration:{dur}] [transition-timing-function:{tw_val(ease)}]'
+        for c, decls in el['hover']:
+            if c is None: cls += ' ' + tw(decls, 'hover:')
+    if group:
+        for c, decls in group[1]:
+            if c == el['cls']: cls += ' ' + tw(decls, f'group-hover/{group[0]}:')
+    grp = (gname, el['hover']) if gname else group
+    pad = '  ' * depth
+    attrs = f' className="{cls}" data-name={json.dumps(m["name"], ensure_ascii=False)}'
+    if el['svg'] is not None:
+        return f'{pad}<div{attrs}>{svg_jsx(el["svg"])}</div>'
+    if el['spans'] is not None:
+        inner = ''.join(f'<span className="{tw(d)}">{jsx_text(t)}</span>' if d else jsx_text(t) for t, d in el['spans'])
+        return f'{pad}<div{attrs}><span>{inner}</span></div>'
+    if not el['children']: return f'{pad}<div{attrs} />'
+    return f'{pad}<div{attrs}>\n' + '\n'.join(render_jsx(c, depth + 1, grp) for c in el['children']) + f'\n{pad}</div>'
 
 # ---------------------------------------------------------------- tree.txt
 def tree_line(m):
@@ -722,6 +944,13 @@ def tree_line(m):
         if r['fills']: b.append('color=' + ','.join(pf(p) for p in r['fills']))
         if len(t['runs']) > 1: b.append(f"runs={len(t['runs'])}")
         b.append(json.dumps(t['characters'][:300], ensure_ascii=False))
+    if m.get('styles'): b.append('style{' + ', '.join(f'{k}="{v}"' for k, v in m['styles'].items()) + '}')
+    for a in m.get('interactions', []):
+        tgt = a.get('targetName') or a.get('target') or a.get('url') or ''
+        tr = f" {a['transition'].lower()} {round((a.get('duration') or 0) * 1000)}ms {(a.get('easing') or '').lower()}" if a.get('transition') else ''
+        b.append(f"on:{a['event'].lower().replace('on_', '')}→{(a['nav'] or '').lower()}({tgt}{tr})")
+    if m.get('hover'): b.append(f"hover→{m['hover'].get('component') or m['hover']['name']}")
+    for a in m.get('annotations', []): b.append(f"annotation={json.dumps(a['label'], ensure_ascii=False)}" + (f"[{','.join(a['properties'])}]" if a['properties'] else ''))
     return ' '.join(b)
 
 def tree(m, depth=0, out=None):
@@ -737,7 +966,8 @@ def tree(m, depth=0, out=None):
 root = resolve(byid[ROOT])
 M = model(root)
 os.makedirs(f'{OUT}/assets/icons', exist_ok=True); os.makedirs(f'{OUT}/assets/images', exist_ok=True)
-body = to_html(M)
+TREE = build(M)
+body = render_html(TREE)
 for fn, svg in ICONS.items(): open(f'{OUT}/assets/icons/{fn}', 'w').write(svg)
 
 def mark_icons(m):
@@ -797,7 +1027,23 @@ svg {{ display: block; overflow: visible; }}
 </body></html>
 """
 open(f'{OUT}/index.html', 'w').write(page)
+
+comp = re.sub(r'[^A-Za-z0-9]+', ' ', M['name']).title().replace(' ', '') or 'FigmaFrame'
+if comp[0].isdigit(): comp = 'Frame' + comp
+root_style = '{{' + ', '.join(f"{json.dumps(css_var(n))}: {json.dumps(c)}" for n, c in sorted(PAINTED.items())) + '}}'
+jsx = render_jsx(TREE, 2)
+jsx = jsx.replace('className="', f'style={root_style} className="antialiased [&_svg]:block [&_svg]:overflow-visible ', 1)
+tsx = f"""// Generated by refigma-mcp from Figma node {M['id']} ("{M['name']}").
+// Exact values from the design; Tailwind arbitrary values keep them 1:1. Token CSS variables are set on the root.
+// Fonts: {font_link.split('href="')[1].split('"')[0] if font_link else 'none'}
+export default function {comp}() {{
+  return (
+{jsx}
+  );
+}}
+"""
+open(f'{OUT}/{comp}.tsx', 'w').write(tsx)
 json.dump(M, open(f'{OUT}/model.json', 'w'), ensure_ascii=False)
 open(f'{OUT}/tree.txt', 'w').write('\n'.join(tree(M)) + '\n')
-print(json.dumps({'nodes': sum(1 for _ in walk_all(M)) + 1, 'icons': len(ICONS), 'images': len(IMAGES), 'images_missing': missing,
+print(json.dumps({'component': f'{comp}.tsx', 'nodes': sum(1 for _ in walk_all(M)) + 1, 'icons': len(ICONS), 'images': len(IMAGES), 'images_missing': missing,
                   'tokens': len(tokens), 'fonts': sorted(HTML_FONTS), 'w': M['w'], 'h': M['h']}))
