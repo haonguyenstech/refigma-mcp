@@ -25,6 +25,7 @@ SVG icons, design tokens and Figma's own PNG, then checks your implementation ag
 ## Contents
 
 - [Quick start](#quick-start)
+- [Updating](#updating)
 - [How it works](#how-it-works)
 - [Tools](#tools)
 - [Fidelity](#fidelity)
@@ -51,9 +52,7 @@ the same command:
 { "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz"] } } }
 ```
 
-**Update:** replace the version in the URL with the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
-(`claude mcp remove refigma-mcp -s user`, then add again). For a global install instead: `npm install -g <the .tgz URL>`,
-then use `refigma-mcp` as the command.
+For a global install instead: `npm install -g <the .tgz URL>`, then use `refigma-mcp` as the command.
 
 Then give the agent a link — right-click a frame in Figma → **Copy link to selection**:
 
@@ -61,6 +60,27 @@ Then give the agent a link — right-click a frame in Figma → **Copy link to s
 
 On the first capture the server copies your figma.com session from Edge. macOS shows a Keychain prompt for
 **Microsoft Edge Safe Storage**: click **Allow**. If captures later report `NOT_LOGGED_IN`, run `figma_relogin`.
+
+## Updating
+
+Each release has its own URL, so an install stays on its version until you switch it — nothing changes under you.
+
+**Which version do I run?** The version is in the URL:
+
+```bash
+claude mcp get refigma-mcp      # Args: -y https://github.com/…/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz
+```
+
+**Update** — take the URL of the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
+(its release notes have the full command) and add the server again:
+
+```bash
+claude mcp remove refigma-mcp -s user
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/vX.Y.Z/refigma-mcp-X.Y.Z.tgz
+```
+
+Then restart Claude Code, or run `/mcp` → `refigma-mcp` → **Reconnect** in an open session. Cached captures are
+re-generated automatically when a release changes the extractor; to roll back, add the older release's URL.
 
 ## How it works
 
@@ -269,6 +289,19 @@ node lib/compare.mjs /tmp/out/index.html <capture dir>/frame.png <w> <h> /tmp/ou
 ```
 
 Run-to-run render noise is about ±0.001%. Accept a change only when no frame gets worse.
+
+### Releasing
+
+A release is a git tag plus the packed `.tgz` attached to its GitHub release — no npm account involved:
+
+```bash
+npm version 0.5.0 --no-git-tag-version          # bump package.json (the server reports this version)
+git commit -am "v0.5.0" && git push
+npm pack                                         # → refigma-mcp-0.5.0.tgz (15 files)
+gh release create v0.5.0 refigma-mcp-0.5.0.tgz --title "v0.5.0" --notes "…"
+```
+
+Put the install command with the new URL in the release notes, then update the URLs in this README.
 
 ## Limitations
 
