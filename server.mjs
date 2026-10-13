@@ -144,7 +144,7 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
     }
     for (const f of MSG_FILES) fs.rmSync(path.join(t.dir, f), { force: true });
   }
-  await run(READER, [t.nodeUrl, t.dir]);
+  await run('bash', [READER, t.nodeUrl, t.dir]);
   stamp(t.dir);
   packMsg(t.dir);
   return { ...t, cached: false, source: 'clipboard' };
@@ -170,7 +170,8 @@ const componentFile = r => JSON.parse(read(r, 'extract.json')).component;
 const pngSize = f => { const b = fs.readFileSync(f); return { w: b.readUInt32BE(16), h: b.readUInt32BE(20), bytes: b.length }; };
 const inlinable = f => { const { w, h, bytes } = pngSize(f); return w <= 7900 && h <= 7900 && bytes <= 5 << 20; };
 
-const server = new McpServer({ name: 'refigma-mcp', version: '0.3.0' });
+const { version } = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const server = new McpServer({ name: 'refigma-mcp', version });
 
 server.registerTool('figma_get_metadata', {
   title: 'Outline of a Figma file / node',

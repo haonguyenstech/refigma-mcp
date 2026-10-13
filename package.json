@@ -1,24 +1,57 @@
 {
   "name": "refigma-mcp",
-  "version": "0.1.0",
-  "description": "Read Figma frames without REST API or plugins: copy the node in a logged-in debug Edge, decode Figma's clipboard binary locally.",
+  "version": "0.4.0",
+  "description": "MCP server that reads Figma frames without the REST API, plugins or a paid seat: layout tree, pixel-faithful HTML / React + Tailwind, SVG icons, tokens, and a pixel diff against Figma's own PNG.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "figma",
+    "design-to-code",
+    "claude",
+    "react",
+    "tailwind",
+    "svg",
+    "pixel-diff"
+  ],
+  "homepage": "https://github.com/haonguyenstech/refigma-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/haonguyenstech/refigma-mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haonguyenstech/refigma-mcp.git"
+  },
+  "license": "MIT",
+  "author": "Hao Nguyen",
   "type": "module",
   "bin": {
     "refigma-mcp": "server.mjs",
     "figma-read": "bin/figma-read"
   },
+  "files": [
+    "server.mjs",
+    "lib/*.mjs",
+    "lib/*.py",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.15"
+  },
+  "os": [
+    "darwin"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
+    "esbuild": "^0.25.10",
     "fzstd": "^0.1.1",
     "kiwi-schema": "^0.5.0",
     "pako": "^2.1.0",
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0",
-    "zod": "^4.6.5"
-  },
-  "devDependencies": {
-    "esbuild": "^0.25.10",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "zod": "^4.6.5"
   }
 }

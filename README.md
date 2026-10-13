@@ -5,11 +5,13 @@
 An [MCP](https://modelcontextprotocol.io) server that turns a Figma link into a layout tree, pixel-faithful HTML / React + Tailwind,
 SVG icons, design tokens and Figma's own PNG, then checks your implementation against that PNG pixel by pixel.
 
+[![npm](https://img.shields.io/npm/v/refigma-mcp?color=cb3837&logo=npm)](https://www.npmjs.com/package/refigma-mcp)
 ![MCP server](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.15-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Microsoft%20Edge-0078D7?logo=microsoftedge&logoColor=white)
 ![Fidelity](https://img.shields.io/badge/pixel%20match-99.07%E2%80%9399.98%25-success)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 |  | Figma REST API | Figma plugin | **refigma-mcp** |
 | --- | --- | --- | --- |
@@ -38,10 +40,17 @@ SVG icons, design tokens and Figma's own PNG, then checks your implementation ag
 **Requirements:** macOS, Microsoft Edge signed in to figma.com, Node ≥ 22.15, Python 3 with `cryptography`, `curl`.
 
 ```bash
-git clone https://github.com/haonguyenstech/refigma-mcp ~/coding/js/refigma-mcp
-cd ~/coding/js/refigma-mcp && npm install
-claude mcp add -s user refigma-mcp -- node ~/coding/js/refigma-mcp/server.mjs
+claude mcp add -s user refigma-mcp -- npx -y refigma-mcp
 ```
+
+Any other MCP client takes the same command:
+
+```json
+{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "refigma-mcp"] } } }
+```
+
+`npx` downloads the package on first use and keeps it cached; `npx -y refigma-mcp@latest` picks up new releases.
+For a global install instead: `npm install -g refigma-mcp`, then use `refigma-mcp` as the command.
 
 Then give the agent a link — right-click a frame in Figma → **Copy link to selection**:
 
@@ -224,12 +233,19 @@ Deleting any of it is safe: it is captured again on the next call.
 ## CLI
 
 ```bash
-bin/figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
+npx -p refigma-mcp figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
 ```
 
 Writes the same outputs as the server (default `~/.figma-local/out/<file>/<node>`).
 
 ## Development
+
+Run from a checkout instead of the published package:
+
+```bash
+git clone https://github.com/haonguyenstech/refigma-mcp && cd refigma-mcp && npm install
+claude mcp add -s user refigma-mcp -- node "$PWD/server.mjs"
+```
 
 ```text
 server.mjs          MCP tools, cache, lock, source selection
