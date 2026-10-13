@@ -3,12 +3,13 @@ tree.txt, index.html (+ inline CSS), SVG icons, downloaded images and tokens.
 
 usage: extract.py <msg.json> <root node id> <out dir>
 """
-import base64, copy, hashlib, html, json, math, os, re, shutil, struct, subprocess, sys, time, urllib.request
+import base64, copy, gzip, hashlib, html, json, math, os, re, shutil, struct, subprocess, sys, time, urllib.parse, urllib.request
 
 MSG, ROOT, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-msg = json.load(open(MSG))
+msg = json.load(gzip.open(MSG) if MSG.endswith('.gz') else open(MSG))
 N = msg['nodeChanges']
 META = msg.get('__figmeta', {})
+if not re.fullmatch(r'[A-Za-z0-9]+', str(META.get('fileKey') or '')): META.pop('fileKey', None)
 g = lambda x: f"{x['sessionID']}:{x['localID']}"
 byid = {g(n['guid']): n for n in N}
 kids = {}
@@ -43,11 +44,23 @@ def resolve_styles(o):
         if st:
             for p in props:
                 if p in st: o[p] = copy.deepcopy(st[p])
+    # text runs reference styles too; a run's own fields are overrides on top of its style (isOverrideOverTextStyle)
+    for run in ((o.get('textData') or {}).get('styleOverrideTable') or []) + (o.get('styleOverrideTable') or []):
+        for ref, props in STYLE_PROPS.items():
+            st = style_node(run.get(ref))
+            if st:
+                for p in props:
+                    if p in st and p not in run: run[p] = copy.deepcopy(st[p])
 
-for n in N:
-    if n.get('styleType'): continue
+# lazily, for the nodes actually rendered: a page document holds ~100k nodes, the frame a few hundred (2s -> ~0).
+# Only ever on raw nodes, before overrides are applied: an override's own paints must win over the node's style.
+STYLED = set()
+def ensure_styles(n):
+    if id(n) in STYLED or n.get('styleType'): return n
+    STYLED.add(id(n))
     resolve_styles(n)
     for e in (n.get('symbolData') or {}).get('symbolOverrides') or []: resolve_styles(e)
+    return n
 
 # ---------------------------------------------------------------- variables / tokens
 VARS = {}           # key or guid -> VARIABLE node
@@ -84,7 +97,7 @@ def resolve_var(var, depth=0):
     if not e: return None
     d = e.get('variableData', {}); val = d.get('value', {})
     if 'alias' in val: return resolve_var(alias_target(d), depth + 1)
-    return val.get('colorValue') or val.get('floatValue') or val.get('textValue')
+    return next((val[k] for k in ('colorValue', 'floatValue', 'textValue', 'boolValue') if k in val), None)
 
 def push_modes(n):
     ctx = dict(MODE_CTX[-1])
@@ -118,7 +131,7 @@ def var_value(var, depth=0):
             t = alias_target(d)
             if t:
                 sub = var_value(t, depth + 1)
-                out[mode] = next(iter(sub.values()), None) if sub else None
+                out[mode] = sub.get(mode, next(iter(sub.values()), None)) if sub else None
                 continue
         if 'colorValue' in val: out[mode] = rgba(val['colorValue'])
         elif 'floatValue' in val: out[mode] = val['floatValue']
@@ -148,7 +161,10 @@ def paint(p, w, h):
         # a bound variable is authoritative; the paint's cached colour can be stale (e.g. after a variant swap)
         var = alias_target(p.get('colorVar'))
         c = resolve_var(var) if var else None
-        return {'type': 'solid', 'color': rgba(c if isinstance(c, dict) else p['color'], op), 'token': token_of(p.get('colorVar'))}
+        if isinstance(c, dict):
+            if abs(op - c.get('a', 1)) < 0.002 and p['color'].get('a', 1) >= 0.999: op = 1
+        else: c = p['color']
+        return {'type': 'solid', 'color': rgba(c, op), 'token': token_of(p.get('colorVar'))}
     if t.startswith('GRADIENT'):
         stops = [{'color': rgba(s['color'], op), 'pos': s['position']} for s in p.get('stops', [])]
         it = inv(p.get('transform') or {'m00': 1, 'm01': 0, 'm02': 0, 'm10': 0, 'm11': 1, 'm12': 0})
@@ -223,6 +239,8 @@ def ovmap(entries):
     for e in entries or []:
         path = tuple(g(x) for x in e.get('guidPath', {}).get('guids', []))
         if path: m.setdefault(path, {}).update(e)
+    # one node can have several entries (a style reference in one, stale cached paints in a later one): the style wins
+    for e in m.values(): resolve_styles(e)
     return m
 
 PROPDEFS = {}
@@ -235,6 +253,18 @@ def propdefault(sym, defid):
         if g(d['id']) == defid:
             if 'initialValue' in d: return d['initialValue']
             if d.get('parentPropDefId'): return PROPDEFS.get(g(d['parentPropDefId']))
+
+def prop_value(a):
+    v = a.get('value') or {}
+    if v: return v
+    vv = (a.get('varValue') or {}).get('value') or {}
+    if 'alias' in vv:
+        r = resolve_var(alias_target(a['varValue']))
+        return {'boolValue': r} if isinstance(r, bool) else {'textValue': {'characters': r}} if isinstance(r, str) else {}
+    if 'boolValue' in vv: return {'boolValue': vv['boolValue']}
+    if 'symbolIdValue' in vv: return {'guidValue': vv['symbolIdValue']['guid']}
+    if isinstance(vv.get('textValue'), str): return {'textValue': {'characters': vv['textValue']}}
+    return {}
 
 def apply_props(n, pv):
     if not pv or not n.get('componentPropRefs'): return n
@@ -254,7 +284,7 @@ def resolve(n, ov=None, pv=None):
     n = dict(n)
     if n.get('type') == 'INSTANCE':
         sym_id = g(n['overriddenSymbolID']) if n.get('overriddenSymbolID') else g((n.get('symbolData') or {}).get('symbolID') or n['guid'])
-        sym = byid.get(sym_id, {})
+        sym = ensure_styles(byid.get(sym_id, {}))
         n['_component'] = sym.get('name')
         inner = ovmap((n.get('symbolData') or {}).get('symbolOverrides'))
         for path, e in ovmap(n.get('derivedSymbolData')).items():
@@ -267,9 +297,11 @@ def resolve(n, ov=None, pv=None):
             v = propdefault(sym, g(d['id']))
             if v is not None: ipv[g(d['id'])] = v
         for a in n.get('componentPropAssignments') or []:
-            ipv[g(a['defID'])] = a.get('value') or {}
+            ipv[g(a['defID'])] = prop_value(a)
         # the symbol's own frame styling is the instance's base; instance fields win
-        base = {k: v for k, v in sym.items() if k not in ('guid', 'parentIndex', 'transform', 'name', 'type', 'size', 'visible', 'componentPropDefs')}
+        # (not the component's own placement in its component set: stackChild* / stackPositioning belong to the instance)
+        base = {k: v for k, v in sym.items() if k not in ('guid', 'parentIndex', 'transform', 'name', 'type', 'size', 'visible', 'componentPropDefs',
+                                                          'stackChildPrimaryGrow', 'stackChildAlignSelf', 'stackPositioning')}
         orig = g((n.get('symbolData') or {}).get('symbolID') or n['guid'])
         if sym_id != orig:
             # variant swapped from outside: the raw node still carries the old variant's styling
@@ -286,7 +318,7 @@ def resolve(n, ov=None, pv=None):
     return n
 
 def resolve_child(c, ov, pv):
-    k = key(c)
+    k = key(ensure_styles(c))
     c = apply_props(apply_ov(c, ov.get((k,))), pv)
     if c.get('type') == 'INSTANCE':
         return resolve(c, {p[1:]: e for p, e in ov.items() if len(p) > 1 and p[0] == k}, None)
@@ -433,11 +465,13 @@ HOVER_DEPTH = []
 VECTORISH = {'VECTOR', 'BOOLEAN_OPERATION', 'ELLIPSE', 'STAR', 'REGULAR_POLYGON', 'LINE', 'RECTANGLE', 'ROUNDED_RECTANGLE'}
 ICONS, IMAGES = {}, set()
 
+def safe_family(f): return re.sub(r'''[^\w .+-]''', '', f) if f else f
+
 def text_model(n):
     td = n.get('textData') or {}
     chars = td.get('characters', '')
     fn = n.get('fontName', {})
-    base = {'family': fn.get('family'), 'style': fn.get('style'), 'weight': font_weight(fn.get('style')),
+    base = {'family': safe_family(fn.get('family')), 'style': fn.get('style'), 'weight': font_weight(fn.get('style')),
             'italic': 'italic' in (fn.get('style') or '').lower(), 'size': n.get('fontSize', 12),
             'lineHeight': n.get('lineHeight'), 'letterSpacing': n.get('letterSpacing'),
             'decoration': n.get('textDecoration'), 'case': n.get('textCase'),
@@ -452,7 +486,7 @@ def text_model(n):
             if sid != cur or i == len(chars):
                 if i > start:
                     st = dict(base); o = table.get(cur, {})
-                    if 'fontName' in o: st.update(family=o['fontName'].get('family'), style=o['fontName'].get('style'), weight=font_weight(o['fontName'].get('style')), italic='italic' in o['fontName'].get('style', '').lower())
+                    if 'fontName' in o: st.update(family=safe_family(o['fontName'].get('family')), style=o['fontName'].get('style'), weight=font_weight(o['fontName'].get('style')), italic='italic' in (o['fontName'].get('style') or '').lower())
                     for k_src, k_dst in (('fontSize', 'size'), ('lineHeight', 'lineHeight'), ('letterSpacing', 'letterSpacing'), ('textDecoration', 'decoration'), ('textCase', 'case')):
                         if k_src in o: st[k_dst] = o[k_src]
                     if 'fillPaints' in o: st['fills'] = paints(o['fillPaints'], 1, 1)
@@ -473,9 +507,13 @@ def _model(n, parent_layout=None):
     w, h = s.get('x', 0), s.get('y', 0)
     m = {'id': g(n['guid']), 'type': t, 'name': n.get('name', ''), 'w': w, 'h': h,
          'x': tr.get('m02', 0), 'y': tr.get('m12', 0), 'rotation': round(math.degrees(math.atan2(tr.get('m10', 0), tr.get('m00', 1))), 3)}
+    mx = [tr.get('m00', 1), tr.get('m10', 0), tr.get('m01', 0), tr.get('m11', 1)]   # CSS matrix(a, b, c, d) order
+    if max(abs(v - i) for v, i in zip(mx, (1, 0, 0, 1))) > 1e-6: m['matrix'] = [round(v, 6) for v in mx]   # rotation and/or flip
     if n.get('_component'): m['component'] = n['_component']
+    if n.get('isMask'): m['mask'] = n.get('maskType') or 'ALPHA'   # clips the siblings above it, is not painted itself
     if n.get('opacity', 1) < 0.999: m['opacity'] = n['opacity']
-    if n.get('blendMode') not in (None, 'NORMAL', 'PASS_THROUGH'): m['blend'] = n['blendMode'].lower().replace('_', '-')
+    if n.get('blendMode') not in (None, 'NORMAL', 'PASS_THROUGH'):   # CSS has no linear-burn / linear-dodge
+        m['blend'] = {'LINEAR_BURN': 'multiply', 'LINEAR_DODGE': 'plus-lighter'}.get(n['blendMode'], n['blendMode'].lower().replace('_', '-'))
     if n.get('stackMode') in ('HORIZONTAL', 'VERTICAL'):
         hp = n.get('stackHorizontalPadding', 0); vp = n.get('stackVerticalPadding', 0)
         m['layout'] = {'dir': 'row' if n['stackMode'] == 'HORIZONTAL' else 'col', 'gap': n.get('stackSpacing', 0),
@@ -562,7 +600,7 @@ def svg_paint(ps, defs=None):
     for p in reversed(ps or []):  # topmost paint
         if p['type'] == 'solid': return p['color']
         if defs is not None and p['type'] in ('linear', 'radial') and p.get('stops'):
-            gid = f'g{len(defs)}_{seq[0]}'
+            gid = f'__ID__g{len(defs)}'
             stops = ''.join(f'<stop offset="{fmt(float(st["pos"]))}" stop-color="{st["color"]}"/>' for st in p['stops'])
             if p['type'] == 'linear':
                 (x1, y1), (x2, y2) = p['p0'], p['p1']
@@ -573,11 +611,40 @@ def svg_paint(ps, defs=None):
             return f'url(#{gid})'
     return 'none'
 
+def arc_path(a, w, h):
+    """Figma arcData: angles in radians from 3 o'clock, clockwise; innerRadius as a fraction of the radius."""
+    cx, cy, rx, ry = w / 2, h / 2, w / 2, h / 2
+    s0, s1, ir = a.get('startingAngle', 0), a.get('endingAngle', 2 * math.pi), a.get('innerRadius', 0) or 0
+    sweep = s1 - s0
+    pt = lambda ang, k: f'{fmt(cx + rx * k * math.cos(ang))} {fmt(cy + ry * k * math.sin(ang))}'
+    ring = lambda k: f'M{pt(0, k)}A{fmt(rx * k)} {fmt(ry * k)} 0 1 1 {pt(math.pi, k)}A{fmt(rx * k)} {fmt(ry * k)} 0 1 1 {pt(0, k)}Z'
+    if abs(sweep) >= 2 * math.pi - 1e-4: return ring(1) + (ring(ir) if ir else '')
+    large = 1 if abs(sweep) > math.pi else 0
+    outer = f'M{pt(s0, 1)}A{fmt(rx)} {fmt(ry)} 0 {large} 1 {pt(s1, 1)}'
+    if not ir: return f'{outer}L{fmt(cx)} {fmt(cy)}Z'
+    return f'{outer}L{pt(s1, ir)}A{fmt(rx * ir)} {fmt(ry * ir)} 0 {large} 0 {pt(s0, ir)}Z'
+
+def rounded_rect_path(w, h, r):
+    tl, tr_, br, bl = (min(v, w / 2, h / 2) for v in r)
+    return (f'M{fmt(tl)} 0H{fmt(w - tr_)}A{fmt(tr_)} {fmt(tr_)} 0 0 1 {fmt(w)} {fmt(tr_)}V{fmt(h - br)}'
+            f'A{fmt(br)} {fmt(br)} 0 0 1 {fmt(w - br)} {fmt(h)}H{fmt(bl)}A{fmt(bl)} {fmt(bl)} 0 0 1 0 {fmt(h - bl)}'
+            f'V{fmt(tl)}A{fmt(tl)} {fmt(tl)} 0 0 1 {fmt(tl)} 0Z')
+
+def svg_children(children, defs):
+    i = next((k for k, c in enumerate(children) if c.get('mask')), None)
+    if i is None: return ''.join(svg_node(c, defs) for c in children)
+    mk = children[i]; mid = f'__ID__m{len(defs)}'
+    shape = re.sub(r'\s(fill|stroke)="(?!none")[^"]*"', r' \1="#fff"', svg_node({**mk, 'mask': None}, defs))
+    defs.append(f'<clipPath id="{mid}">{shape}</clipPath>' if mk['mask'] == 'OUTLINE' else f'<mask id="{mid}" maskUnits="userSpaceOnUse">{shape}</mask>')
+    attr = 'clip-path' if mk['mask'] == 'OUTLINE' else 'mask'
+    return ''.join(svg_node(c, defs) for c in children[:i]) + f'<g {attr}="url(#{mid})">{svg_children(children[i + 1:], defs)}</g>'
+
 def svg_node(m, defs, top=False):
     """SVG markup for a vector-ish node, in its parent's coordinate space."""
     if top: tf = ''
     else:
-        tf = f' transform="translate({fmt(m["x"])} {fmt(m["y"])})' + (f' rotate({fmt(m["rotation"])})' if m['rotation'] else '') + '"'
+        tf = (f' transform="matrix({" ".join(fmt(v) for v in m["matrix"])} {fmt(m["x"])} {fmt(m["y"])})"' if m.get('matrix')
+              else f' transform="translate({fmt(m["x"])} {fmt(m["y"])})"')
     op = f' opacity="{fmt(m["opacity"])}"' if m.get('opacity') is not None else ''
     t = m['type']; w, h = m['w'], m['h']
     fill = svg_paint(m.get('fills'), defs); st = m.get('stroke')
@@ -597,10 +664,12 @@ def svg_node(m, defs, top=False):
         if st and m.get('strokePath'): out.append(f'<path d="{m["strokePath"]}" fill="none"{sattr}/>')
         return f'<g{tf}{op}>' + ''.join(out) + '</g>'
     if t == 'ELLIPSE':
+        if m.get('arc'): return f'<path{tf}{op} d="{arc_path(m["arc"], w, h)}" fill="{fill}" fill-rule="evenodd"{sattr}/>'
         return f'<ellipse{tf}{op} cx="{fmt(w / 2)}" cy="{fmt(h / 2)}" rx="{fmt(w / 2)}" ry="{fmt(h / 2)}" fill="{fill}"{sattr}/>'
     if t in ('RECTANGLE', 'ROUNDED_RECTANGLE'):
-        r = (m.get('radius') or [0])[0]
-        return f'<rect{tf}{op} width="{fmt(w)}" height="{fmt(h)}" rx="{fmt(r)}" fill="{fill}"{sattr}/>'
+        rr = m.get('radius') or [0] * 4
+        if len(set(rr)) > 1: return f'<path{tf}{op} d="{rounded_rect_path(w, h, rr)}" fill="{fill}"{sattr}/>'
+        return f'<rect{tf}{op} width="{fmt(w)}" height="{fmt(h)}" rx="{fmt(rr[0])}" fill="{fill}"{sattr}/>'
     if t == 'LINE':
         return f'<line{tf}{op} x1="0" y1="0" x2="{fmt(w)}" y2="0"{sattr or " stroke=\"#000\""}/>'
     if t in ('STAR', 'REGULAR_POLYGON'):
@@ -610,12 +679,14 @@ def svg_node(m, defs, top=False):
             r = (m['innerRadius'] if t == 'STAR' and i % 2 else 1)
             pts.append(f'{fmt(w / 2 + math.cos(a) * w / 2 * r)},{fmt(h / 2 + math.sin(a) * h / 2 * r)}')
         return f'<polygon{tf}{op} points="{" ".join(pts)}" fill="{fill}"{sattr}/>'
-    inner = ''.join(svg_node(c, defs) for c in m['children'])
+    inner = svg_children(m['children'], defs)
     if t == 'BOOLEAN_OPERATION' and m['boolean'] in ('SUBTRACT', 'INTERSECT') and len(m['children']) > 1:
-        mid = f'b{len(defs)}'
+        mid = f'__ID__b{len(defs)}'
         first = svg_node(m['children'][0], defs)
         rest = ''.join(svg_node(c, defs) for c in m['children'][1:])
         if m['boolean'] == 'SUBTRACT':
+            rest = re.sub(r'\s(fill|stroke)="(?!none")[^"]*"', r' \1="#000"', rest)
+            rest = re.sub(r'\s(opacity|fill-opacity|stroke-opacity)="[^"]*"', '', rest)
             defs.append(f'<mask id="{mid}" maskUnits="userSpaceOnUse"><rect x="-1e4" y="-1e4" width="2e4" height="2e4" fill="#fff"/><g fill="#000" stroke="#000">{rest}</g></mask>')
             return f'<g{tf}{op} mask="url(#{mid})">{first}</g>'
         defs.append(f'<clipPath id="{mid}">{rest}</clipPath>')
@@ -628,8 +699,9 @@ def svg_doc(m):
     defs = []
     body = svg_node(m, defs, top=True)
     d = f'<defs>{"".join(defs)}</defs>' if defs else ''
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{fmt(m["w"])}" height="{fmt(m["h"])}" '
-            f'viewBox="0 0 {fmt(m["w"])} {fmt(m["h"])}" fill="none" overflow="visible">{d}{body}</svg>')
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{fmt(m["w"])}" height="{fmt(m["h"])}" '
+           f'viewBox="0 0 {fmt(m["w"])} {fmt(m["h"])}" fill="none" overflow="visible">{d}{body}</svg>')
+    return svg.replace('__ID__', f'i{hashlib.sha1(svg.encode()).hexdigest()[:6]}-') if '__ID__' in svg else svg
 
 def icon_file(m):
     svg = svg_doc(m)
@@ -644,10 +716,11 @@ CSS, HTML_FONTS = [], {}
 seq = [0]
 
 OUTLINE = {}   # id(model) -> outline declaration for uniform solid strokes
+SIDES = {}     # id(model) -> ::after declarations for per-side solid strokes
 PAINTED = {}   # token -> colour as painted in this frame (authoritative over the variable's default mode)
 def color_css(p):
     if p['type'] == 'solid' and p.get('token'): PAINTED.setdefault(p['token'], p['color'])
-    if p['type'] == 'solid': return f"var({css_var(p['token'])}, {p['color']})" if p.get('token') else p['color']
+    if p['type'] == 'solid': return f"var({css_var(p['token'])}, {p['color']})" if p.get('token') and PAINTED[p['token']] == p['color'] else p['color']
     return p.get('css', 'transparent')
 
 def bg_css(fills):
@@ -685,7 +758,7 @@ def run_css(r, base=None):
     case = {'UPPER': 'uppercase', 'LOWER': 'lowercase', 'TITLE': 'capitalize'}.get(r.get('case'))
     if case and (not base or r['case'] != base['case']): out.append(f'text-transform: {case}')
     if r['fills'] and (not base or r['fills'] != base['fills']):
-        f = r['fills'][0]
+        f = r['fills'][-1]
         if f['type'] == 'solid': out.append(f'color: {color_css(f)}')
         else: out.append(f"background: {f.get('css', 'none')}; -webkit-background-clip: text; background-clip: text; color: transparent")
     HTML_FONTS.setdefault(r['family'], set()).add((r['weight'], r['italic']))
@@ -695,14 +768,16 @@ def shadow_css(m):
     sh = []
     st = m.get('stroke')
     if st and m['type'] not in ('TEXT', 'LINE') and not m.get('icon'):
-        if st['paints'][0]['type'] != 'solid': return [e for e in effects_shadow(m)]
-        c = color_css(st['paints'][0])
+        if st['paints'][-1]['type'] != 'solid': return [e for e in effects_shadow(m)]
+        c = color_css(st['paints'][-1])
         w = st['weight']
         if st.get('sides'):
-            t, r, b, l = st['sides']
-            ins = st['align'] != 'OUTSIDE'
-            for dx, dy, v in ((0, 1, t), (-1, 0, r), (0, -1, b), (1, 0, l)):
-                if v: sh.append(f"{'inset ' if ins else ''}{fmt(dx * v * (1 if ins else -1))}px {fmt(dy * v * (1 if ins else -1))}px 0 0 {c}")
+            # per-side strokes as a border on an ::after layer: painted above the children like Figma's strokes (an inset
+            # box-shadow is painted below them, so a child with a background hid it)
+            k = {'INSIDE': 0, 'CENTER': .5, 'OUTSIDE': 1}.get(st['align'], 0)
+            SIDES[id(m)] = ["content: ''", 'position: absolute', 'inset: ' + ' '.join(f'{fmt(-v * k)}px' for v in st['sides']),
+                            'border-style: solid', 'border-width: ' + ' '.join(f'{fmt(v)}px' for v in st['sides']), f'border-color: {c}',
+                            'border-radius: inherit', 'pointer-events: none'] + (['border-style: dashed'] if st.get('dash') else [])
         else:
             # uniform solid stroke -> outline: crisp, follows border-radius, takes no layout space, paints above children like Figma
             off = {'INSIDE': -w, 'CENTER': -w / 2, 'OUTSIDE': 0}.get(st['align'], -w)
@@ -745,8 +820,15 @@ def build(m, parent=None):
     pl = (parent or {}).get('layout')
     ch = m.get('child', {})
     in_flow = pl and not ch.get('absolute')
+    mt = m.get('matrix') if parent is not None else None
     if parent is None:
         css += ['position: relative', f"width: {fmt(m['w'])}px", f"height: {fmt(m['h'])}px"]
+    elif in_flow and mt:
+        a, b, c, d = mt; w, h = m['w'], m['h']
+        xs, ys = (0, a * w, c * h, a * w + c * h), (0, b * w, d * h, b * w + d * h)
+        css += ['position: relative', 'flex: 0 0 auto', f'width: {fmt(w)}px', f'height: {fmt(h)}px',
+                f'margin-right: {fmt(round(max(xs) - min(xs) - w, 3))}px', f'margin-bottom: {fmt(round(max(ys) - min(ys) - h, 3))}px',
+                'transform-origin: 0 0', f'transform: translate({fmt(round(-min(xs), 3))}px, {fmt(round(-min(ys), 3))}px) matrix({", ".join(fmt(v) for v in mt)}, 0, 0)']
     elif in_flow:
         css.append('position: relative')
         row = pl['dir'] == 'row'
@@ -761,9 +843,10 @@ def build(m, parent=None):
     else:
         css += ['position: absolute', f"left: {fmt(m['x'])}px", f"top: {fmt(m['y'])}px", f"width: {fmt(m['w'])}px", f"height: {fmt(m['h'])}px"]
     if m.get('_z'): css.append(f"z-index: {m['_z']}")
-    if m['rotation'] and parent is not None:
-        css += ['transform-origin: 0 0', f"transform: rotate({fmt(-m['rotation'])}deg)"]
+    if mt and not in_flow:   # absolute: the transform's translation is the left/top above
+        css += ['transform-origin: 0 0', f'transform: matrix({", ".join(fmt(v) for v in mt)}, 0, 0)']
     if m.get('opacity') is not None: css.append(f"opacity: {fmt(m['opacity'])}")
+    if m.get('_clip'): css.append(f"clip-path: {m['_clip']}")
     if m.get('blend'): css.append(f"mix-blend-mode: {m['blend']}")
     for k, prop in (('minSize', 'min'), ('maxSize', 'max')):
         v = (m.get(k) or {}).get('value') or {}
@@ -772,19 +855,24 @@ def build(m, parent=None):
 
     if m.get('icon') and m['type'] != 'TEXT':
         el['icon'], el['svg'] = icon_file(m)
+        m['_icon'] = el['icon']
         return el
 
     if m.get('fills'): css.append(bg_css(m['fills']).rstrip(';'))
     if m.get('radius'):
         r = m['radius']; css.append('border-radius: ' + (f'{fmt(r[0])}px' if len(set(r)) == 1 else ' '.join(f'{fmt(x)}px' for x in r)))
     sh = shadow_css(m)
-    if sh: css.append('box-shadow: ' + ', '.join(sh))
+    if sh and m['type'] == 'TEXT':
+        ts = [f"{fmt(e['x'])}px {fmt(e['y'])}px {fmt(e['blur'])}px {e['color']}" for e in m.get('effects', []) if e['type'] == 'drop']
+        if ts: css.append('text-shadow: ' + ', '.join(ts))
+    elif sh: css.append('box-shadow: ' + ', '.join(sh))
     if id(m) in OUTLINE: css.extend(OUTLINE[id(m)].split('; '))
+    el['after'] = SIDES.get(id(m))
     st = m.get('stroke')
-    if st and st['paints'][0]['type'] != 'solid' and 'css' in st['paints'][0]:
+    if st and st['paints'][-1]['type'] != 'solid' and 'css' in st['paints'][-1]:
         w_ = st['weight']; inset = {'INSIDE': 0, 'CENTER': -w_ / 2, 'OUTSIDE': -w_}.get(st['align'], 0)
         el['before'] = ["content: ''", 'position: absolute', f'inset: {fmt(inset)}px', 'border-radius: inherit', f'padding: {fmt(w_)}px',
-                        f"background: {st['paints'][0]['css']}", '-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
+                        f"background: {st['paints'][-1]['css']}", '-webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
                         '-webkit-mask-composite: xor', 'mask-composite: exclude', 'pointer-events: none']
     for e in m.get('effects', []):
         if e['type'] == 'blur': css.append(f"filter: blur({fmt(e['radius'] / 2)}px)")
@@ -792,7 +880,7 @@ def build(m, parent=None):
     if m.get('clip'): css.append('overflow: hidden')
     if m['type'] == 'ELLIPSE': css.append('border-radius: 50%')
     if m['type'] == 'LINE' and m.get('stroke'):
-        css += ['height: 0', f"border-top: {fmt(m['stroke']['weight'])}px solid {color_css(m['stroke']['paints'][0])}"]
+        css += ['height: 0', f"border-top: {fmt(m['stroke']['weight'])}px solid {color_css(m['stroke']['paints'][-1])}"]
     lay = m.get('layout')
     if lay:
         css += ['display: flex', f"flex-direction: {'row' if lay['dir'] == 'row' else 'column'}",
@@ -810,14 +898,21 @@ def build(m, parent=None):
         css += run_css(base)
         css.append('text-align: ' + {'LEFT': 'left', 'CENTER': 'center', 'RIGHT': 'right', 'JUSTIFIED': 'justify'}[tx['alignH']])
         css.append('white-space: ' + ('pre' if tx['autoResize'] == 'WIDTH_AND_HEIGHT' else 'pre-wrap'))
+        if tx['autoResize'] != 'WIDTH_AND_HEIGHT': css.append('overflow-wrap: break-word')   # Figma breaks a word longer than the line
         if tx['truncate']:
             css += ['overflow: hidden', 'text-overflow: ellipsis']
             if tx.get('maxLines'): css += ['display: -webkit-box', '-webkit-box-orient: vertical', f"-webkit-line-clamp: {tx['maxLines']}"]
         el['spans'] = [(r['text'], run_css(r, base)) for r in tx['runs']]
+        el['para'] = tx.get('paragraphSpacing') or 0
     else:
         if lay and lay.get('reverseZ'):   # "first on top": earlier children paint above later ones
             for i, c in enumerate(m['children']): c['_z'] = len(m['children']) - i
-        el['children'] = [build(c, m) for c in m['children']]
+            css.append('isolation: isolate')   # Figma orders layers within their parent: keep these z-indexes local
+        mask = None
+        for c in m['children']:
+            if c.get('mask'): mask = c; continue
+            if mask: c['_clip'] = mask_clip(mask, c)
+            el['children'].append(build(c, m))
     if m.get('hover'):
         hover_rules(el, m, m['hover'])
         a = next((a for a in m.get('interactions', []) if a['event'] == 'ON_HOVER'), {})
@@ -826,6 +921,15 @@ def build(m, parent=None):
                     'EASE_IN_BACK': 'cubic-bezier(0.3,-0.05,0.7,-0.5)', 'EASE_OUT_BACK': 'cubic-bezier(0.45,1.45,0.8,1)'}.get(a.get('easing'), 'ease')
             el['transition'] = f"{round(a['duration'] * 1000)}ms {ease}"
     return el
+
+def mask_clip(mk, c):
+    """CSS clip-path, in sibling c's own box, for the mask layer mk (both in their parent's coordinates)."""
+    l, t = mk['x'] - c['x'], mk['y'] - c['y']
+    if mk['type'] == 'ELLIPSE':
+        return f"ellipse({fmt(mk['w'] / 2)}px {fmt(mk['h'] / 2)}px at {fmt(l + mk['w'] / 2)}px {fmt(t + mk['h'] / 2)}px)"
+    r = mk.get('radius') or [0]
+    rnd = f" round {' '.join(f'{fmt(v)}px' for v in r)}" if any(r) else ''
+    return f"inset({fmt(t)}px {fmt(c['w'] - l - mk['w'])}px {fmt(c['h'] - t - mk['h'])}px {fmt(l)}px{rnd})"
 
 def hover_rules(root_el, base, hov):
     """Pair the default and hover variants node by node and emit paint changes as :hover rules."""
@@ -840,15 +944,31 @@ def hover_rules(root_el, base, hov):
             if ca['name'] == cb['name'] and ca['type'] == cb['type']: pair(ca, cb, chain + [ca['name']])
     pair(base, hov, [])
 
+def paragraphs(spans):
+    """Runs split at line breaks into paragraphs: [[(text, decls), ...], ...]"""
+    out = [[]]
+    for t, d in spans:
+        for i, part in enumerate(t.split('\n')):
+            if i: out.append([])
+            if part: out[-1].append((part, d))
+    return out
+
+def text_html(el, span, esc):
+    """Inner markup of a text node. Paragraph spacing (space between paragraphs) needs one block per paragraph."""
+    if not el.get('para'): return f'<span>{"".join(span(t, d) for t, d in el["spans"])}</span>'
+    ps = paragraphs(el['spans'])
+    return ''.join(f'<div style={esc(i, len(ps))}>{"".join(span(t, d) for t, d in p) or "&#8203;"}</div>' for i, p in enumerate(ps))
+
 # ---- HTML renderer
 def render_html(el, depth=0):
     m = el['m']
     attrs = f' class="{el["cls"]}" data-id="{m["id"]}" data-name="{html.escape(m["name"])}"'
     if m.get('component'): attrs += f' data-component="{html.escape(m["component"])}"'
     for a in m.get('interactions', []):
-        if a['event'] != 'ON_HOVER': attrs += f' data-{a["event"].lower().replace("_", "-")}="{html.escape((a["nav"] or "").lower())}:{a.get("target") or a.get("url") or ""}"'
-    CSS.append(f"/* {m['name']} */ .{el['cls']} {{ {'; '.join(c for c in el['css'] if c)}; }}")
+        if a['event'] != 'ON_HOVER': attrs += f' data-{a["event"].lower().replace("_", "-")}="{html.escape((a["nav"] or "").lower())}:{html.escape(a.get("target") or a.get("url") or "")}"'
+    CSS.append(f"/* {m['name'].replace('*/', '* /').replace('<', '&lt;')} */ .{el['cls']} {{ {'; '.join(c for c in el['css'] if c)}; }}")
     if el['before']: CSS.append(f".{el['cls']}::before {{ {'; '.join(el['before'])}; }}")
+    if el.get('after'): CSS.append(f".{el['cls']}::after {{ {'; '.join(el['after'])}; }}")
     for cls, decls in el['hover']:
         sel = f".{el['cls']}:hover" + (f" .{cls}" if cls else '')
         CSS.append(f"{sel} {{ {'; '.join(decls)}; }}")
@@ -860,8 +980,9 @@ def render_html(el, depth=0):
     if el['svg'] is not None:
         return f'{pad}<div{attrs} data-icon="assets/icons/{el["icon"]}">{el["svg"]}</div>'
     if el['spans'] is not None:
-        inner = ''.join(f'<span style="{"; ".join(d)}">{html.escape(t)}</span>' if d else html.escape(t) for t, d in el['spans'])
-        return f'{pad}<div{attrs}><span>{inner}</span></div>'
+        span = lambda t, d: f'<span style="{"; ".join(d)}">{html.escape(t)}</span>' if d else html.escape(t)
+        gap = lambda i, n: f'"margin-bottom: {fmt(el["para"])}px"' if i < n - 1 else '""'
+        return f'{pad}<div{attrs}>{text_html(el, span, gap)}</div>'
     if not el['children']: return f'{pad}<div{attrs}></div>'
     return f'{pad}<div{attrs}>\n' + '\n'.join(render_html(c, depth + 1) for c in el['children']) + f'\n{pad}</div>'
 
@@ -878,7 +999,7 @@ TW_KEYWORD = {
     ('font-style', 'italic'): 'italic', ('text-transform', 'uppercase'): 'uppercase', ('text-transform', 'lowercase'): 'lowercase',
     ('text-transform', 'capitalize'): 'capitalize', ('text-decoration', 'underline'): 'underline', ('text-decoration', 'line-through'): 'line-through',
     ('transform-origin', '0 0'): 'origin-top-left', ('text-overflow', 'ellipsis'): 'text-ellipsis', ('cursor', 'pointer'): 'cursor-pointer',
-    ('pointer-events', 'none'): 'pointer-events-none', ('box-shadow', 'none'): 'shadow-none',
+    ('pointer-events', 'none'): 'pointer-events-none', ('box-shadow', 'none'): 'shadow-none', ('isolation', 'isolate'): 'isolate',
 }
 TW_PREFIX = {'width': 'w', 'height': 'h', 'min-width': 'min-w', 'max-width': 'max-w', 'min-height': 'min-h', 'max-height': 'max-h',
              'left': 'left', 'top': 'top', 'gap': 'gap', 'row-gap': 'gap-y', 'column-gap': 'gap-x', 'padding': 'p', 'border-radius': 'rounded',
@@ -906,11 +1027,14 @@ def svg_jsx(svg):
     return svg.replace(' class=', ' className=')
 
 def jsx_text(t): return '{' + json.dumps(t, ensure_ascii=False) + '}'
+# quoted JSX attributes take XML entities, not JS escapes
+def jsx_attr(t): return t.replace('&', '&amp;').replace('"', '&quot;').replace('\n', '&#10;')
 
 def render_jsx(el, depth, group=None):
     m = el['m']
     cls = tw(el['css'])
     if el['before']: cls += ' ' + tw(el['before'], 'before:')
+    if el.get('after'): cls += ' ' + tw(el['after'], 'after:')
     gname = None
     if el['hover']:
         gname = el['cls']
@@ -925,12 +1049,13 @@ def render_jsx(el, depth, group=None):
             if c == el['cls']: cls += ' ' + tw(decls, f'group-hover/{group[0]}:')
     grp = (gname, el['hover']) if gname else group
     pad = '  ' * depth
-    attrs = f' className="{cls}" data-name={json.dumps(m["name"], ensure_ascii=False)}'
+    attrs = f' className="{cls}" data-name="{jsx_attr(m["name"])}"'
     if el['svg'] is not None:
         return f'{pad}<div{attrs}>{svg_jsx(el["svg"])}</div>'
     if el['spans'] is not None:
-        inner = ''.join(f'<span className="{tw(d)}">{jsx_text(t)}</span>' if d else jsx_text(t) for t, d in el['spans'])
-        return f'{pad}<div{attrs}><span>{inner}</span></div>'
+        span = lambda t, d: f'<span className="{tw(d)}">{jsx_text(t)}</span>' if d else jsx_text(t)
+        gap = lambda i, n: f'{{{{ marginBottom: {fmt(el["para"])} }}}}' if i < n - 1 else '{{}}'
+        return f'{pad}<div{attrs}>{text_html(el, span, gap)}</div>'
     if not el['children']: return f'{pad}<div{attrs} />'
     return f'{pad}<div{attrs}>\n' + '\n'.join(render_jsx(c, depth + 1, grp) for c in el['children']) + f'\n{pad}</div>'
 
@@ -995,21 +1120,22 @@ def tree(m, depth=0, out=None):
     return out
 
 # ---------------------------------------------------------------- run
-root = resolve(byid[ROOT])
+if ROOT not in byid: sys.exit(f'node {ROOT} is not in the captured data')
+root = resolve(ensure_styles(byid[ROOT]))
+root['visible'] = True
 M = model(root)
 os.makedirs(f'{OUT}/assets/icons', exist_ok=True); os.makedirs(f'{OUT}/assets/images', exist_ok=True)
 TREE = build(M)
 body = render_html(TREE)
 for fn, svg in ICONS.items(): open(f'{OUT}/assets/icons/{fn}', 'w').write(svg)
 
-def mark_icons(m):
-    if m.get('icon') and m['type'] != 'TEXT':
-        svg = svg_doc(m); m['_icon'] = next((f for f, s in ICONS.items() if s == svg), None)
-    for c in m['children']: mark_icons(c)
-mark_icons(M)
 
 missing = []
 urls = META.get('imageHashes', {})
+IMAGE_HOSTS = re.compile(r'(?:[\w-]+\.)*figma\.com|figma-alpha-api\.s3\.[\w-]+\.amazonaws\.com')
+def figma_image_url(u):
+    p = urllib.parse.urlsplit(u) if isinstance(u, str) else None
+    return bool(p and p.scheme == 'https' and IMAGE_HOSTS.fullmatch(p.hostname or '') and not re.search(r'[\s"\\]', u))
 # Images are content-addressed (hash): keep one copy per file so other frames of the file reuse it without a download.
 SHARED = os.path.join(os.path.expanduser('~/.figma-local/out'), META['fileKey'], '_images') if META.get('fileKey') else None
 todo = []
@@ -1033,7 +1159,7 @@ for hsh in sorted(IMAGES):
                 urls.update(fills)
                 if api_cache: os.makedirs(SHARED, exist_ok=True); json.dump(fills, open(api_cache, 'w'))
             except Exception as e: missing.append(f'image-fills API: {e}')
-    if hsh in urls: todo.append((hsh, dst))
+    if hsh in urls and figma_image_url(urls[hsh]): todo.append((hsh, dst))
     else: missing.append(hsh)
 
 # curl --parallel: one process, connections reused; Python's urllib pays ~1-6s of TLS setup per image here
@@ -1041,6 +1167,9 @@ if todo:
     cfg = ''.join(f'url = "{urls[h]}"\noutput = "{d}"\n' for h, d in todo)
     subprocess.run(['curl', '-sSfL', '--parallel', '--parallel-max', '8', '--retry', '2', '--max-time', '60', '-K', '-'], input=cfg, text=True, capture_output=True)
     for hsh, dst in todo:
+        if os.path.exists(dst):
+            with open(dst, 'rb') as fh: head = fh.read(12)
+            if not head.startswith((b'\x89PNG', b'\xff\xd8\xff', b'GIF8')) and head[8:12] != b'WEBP': os.remove(dst)
         if not os.path.exists(dst): missing.append(f'{hsh}: download failed')
         elif SHARED: os.makedirs(SHARED, exist_ok=True); shutil.copyfile(dst, f'{SHARED}/{hsh}.png')
 
@@ -1055,7 +1184,7 @@ fonts = []
 for fam, ws in HTML_FONTS.items():
     if not fam: continue
     spec = ';'.join(sorted({f"{int(i)},{w}" for w, i in ws}))
-    fonts.append(f"family={fam.replace(' ', '+')}:ital,wght@{spec}")
+    fonts.append(f"family={urllib.parse.quote_plus(fam)}:ital,wght@{spec}")
 font_link = f'<link rel="stylesheet" href="https://fonts.googleapis.com/css2?{"&".join(fonts)}&display=block">' if fonts else ''
 
 page = f"""<!doctype html>
@@ -1082,7 +1211,7 @@ if comp[0].isdigit(): comp = 'Frame' + comp
 root_style = '{{' + ', '.join(f"{json.dumps(css_var(n))}: {json.dumps(c)}" for n, c in sorted(PAINTED.items())) + '}}'
 jsx = render_jsx(TREE, 2)
 jsx = jsx.replace('className="', f'style={root_style} className="antialiased [&_svg]:block [&_svg]:overflow-visible ', 1)
-tsx = f"""// Generated by refigma-mcp from Figma node {M['id']} ("{M['name']}").
+tsx = f"""// Generated by refigma-mcp from Figma node {' '.join(str(M['id']).split())} ("{' '.join(M['name'].split())}").
 // Exact values from the design; Tailwind arbitrary values keep them 1:1. Token CSS variables are set on the root.
 // Fonts: {font_link.split('href="')[1].split('"')[0] if font_link else 'none'}
 export default function {comp}() {{

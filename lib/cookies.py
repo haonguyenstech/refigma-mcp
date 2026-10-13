@@ -19,10 +19,16 @@ def dec(b):
     try: return p.decode()
     except UnicodeDecodeError: return p[32:].decode(errors='replace')   # Chromium 130+: 32-byte domain hash prefix
 
-tmp = tempfile.mktemp(suffix='.db'); shutil.copy(os.path.join(PROFILE, 'Cookies'), tmp)
+fd, tmp = tempfile.mkstemp(suffix='.db'); os.close(fd)   # private 0600 file, no name race
 out = []
-for h, n, v, path, sec, ho, exp, ss in sqlite3.connect(tmp).execute(
-        "select host_key,name,encrypted_value,path,is_secure,is_httponly,expires_utc,samesite from cookies where host_key like '%figma.com'"):
+try:
+    shutil.copyfile(os.path.join(PROFILE, 'Cookies'), tmp)
+    rows = sqlite3.connect(tmp).execute(
+        "select host_key,name,encrypted_value,path,is_secure,is_httponly,expires_utc,samesite from cookies "
+        "where host_key in ('figma.com', '.figma.com') or host_key like '%.figma.com'").fetchall()
+finally:
+    os.remove(tmp)
+for h, n, v, path, sec, ho, exp, ss in rows:
     val = dec(v)
     if not val: continue
     c = {'name': n, 'value': val, 'path': path, 'secure': bool(sec), 'httpOnly': bool(ho),
@@ -31,5 +37,4 @@ for h, n, v, path, sec, ho, exp, ss in sqlite3.connect(tmp).execute(
     else: c['domain'] = h
     if exp: c['expires'] = exp / 1_000_000 - 11644473600
     out.append({k: v for k, v in c.items() if v is not None})
-os.remove(tmp)
 print(json.dumps(out))

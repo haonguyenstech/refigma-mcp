@@ -44,7 +44,7 @@ Measured on a 154k-node file (View seat):
 | Node on a page recorded in the last 30 min (`REFIGMA_DOC_MAX_AGE`), incl. `figma_get_nodes` batches | ~3-5s (no browser; the page is decoded once per batch) |
 | First node of a page / older recording (live capture: Figma's copy data + PNG) | ~25-35s, mostly Figma: ~10s for the server to send the page, ~11s for its own JS to load it |
 | `figma_get_metadata` / `figma_search` on a new page (document only) | ~12s |
-| Anything already captured | instant (cache) |
+| Anything captured in the last 12h (`REFIGMA_CACHE_MAX_AGE`, seconds) | instant (cache); every answer states the capture's age |
 
 Both sources produce the same code: style references (library shadow / image fill / text styles) are resolved to the
 style's current values for every node and instance override. Figma's copy handler skips them inside overrides, so
@@ -53,11 +53,22 @@ the node is captured live. `REFIGMA_SOURCE=clipboard` forces live captures. `REF
 the prototype viewer first, which loads just the frame (~1MB instead of the whole page), but timing varies (10-25s)
 and images the browser already cached are not seen.
 
+Captures are serialized across every refigma process on the machine (`~/.figma-local/capture.lock`), each capture
+uses a tab of its own that it closes, and outputs record the extractor version: after an update of `lib/extract.py` a
+cached capture is re-generated from its `msg.json.gz` instead of serving old code. `figma_compare` can diff one element
+of a running app (`selector`, `viewport`, `local_storage` for pages behind a login, `settle_ms`).
+
 ## What makes it faithful
 
 - Instances are expanded the way Figma does: `guidPath` overrides (instance boundaries only), component properties
   (boolean / text / instance swap, defaults from the component set), variant swaps reset to the new variant's styling.
-- Variable-bound colours are resolved through alias chains in the active mode — the paint's cached colour can be stale.
+- Variable-bound colours are resolved through alias chains in the active mode — the paint's cached colour can be stale;
+  a bound colour's alpha is mirrored into the paint opacity by Figma and is applied once.
+- Component property values are read from `value` or, in newer files, `varValue` (incl. variable-bound booleans).
+- A style reference wins over cached paints, also across several override entries of one node and in text runs.
+- Rotations and flips use the full transform matrix; in auto layout the rotated bounding box takes the slot.
+- Strokes paint above children (outline, or an `::after` border for per-side strokes); "first on top" stacks are isolated.
+- Mask layers clip the layers above them; arcs (pie / donut), per-corner radii, paragraph spacing and text shadows render.
 - `stackReverseZIndex` ("first on top") becomes z-index; uniform strokes become `outline` with negative offset
   (no layout impact, painted above children, like Figma); gradient strokes use a masked `::before`.
 - Comparison runs in a separate headless Edge with `--force-color-profile=srgb`: macOS Edge otherwise renders in

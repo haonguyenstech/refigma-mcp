@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
+import crypto from 'node:crypto';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const LIB = f => path.join(ROOT, 'lib', f);
@@ -21,28 +23,88 @@ const ENV = { ...process.env, PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/
   // node data comes from a recorded page document only while it is recent; older ones fall back to a live capture
   REFIGMA_DOC_MAX_AGE: process.env.REFIGMA_DOC_MAX_AGE || '1800' };
 
+// "16140-105700" / "16140:105700" / instance "I123-45;67-89" -> "I123:45;67:89"; anything else is rejected (it becomes a path)
+const NODE_ID = /^I?\d+:\d+(;\d+:\d+)*$/;
+function normNode(id) {
+  if (!id) return null;
+  const n = String(id).trim().replaceAll('-', ':');
+  if (!NODE_ID.test(n)) throw new Error(`Invalid node id "${id}" (expected e.g. 3685:53706)`);
+  return n;
+}
+const nodeDir = node => node.replaceAll(':', '-');
+
 function parseUrl(url, nodeOverride) {
   const u = new URL(url);
-  const file = u.pathname.match(/\/(?:design|file|proto)\/([A-Za-z0-9]+)/)?.[1];
-  if (!file) throw new Error('Expected a figma.com/design/<fileKey>/... link');
-  const node = (nodeOverride || u.searchParams.get('node-id') || '').replace('-', ':') || null;
+  if (!/^(www\.)?figma\.com$/.test(u.hostname)) throw new Error('Expected a figma.com link');
+  // a branch link is /design/<main key>/branch/<branch key>/...: the branch is its own file
+  const m = u.pathname.match(/\/(?:design|file|proto)\/([A-Za-z0-9]+)(?:\/branch\/([A-Za-z0-9]+))?/);
+  if (!m) throw new Error('Expected a figma.com/design/<fileKey>/... link');
+  const file = m[2] || m[1];
+  const base = `https://www.figma.com/design/${m[1]}${m[2] ? `/branch/${m[2]}` : ''}/x`;
+  const node = normNode(nodeOverride || u.searchParams.get('node-id'));
   const fdir = path.join(CACHE, file);
-  return { file, node, fdir, dir: node ? path.join(fdir, node.replace(':', '-')) : null,
-    nodeUrl: node ? `${u.origin}/design/${file}/x?node-id=${node.replace(':', '-')}` : `${u.origin}/design/${file}/x` };
+  return { file, node, fdir, dir: node ? path.join(fdir, nodeDir(node)) : null,
+    protoUrl: node ? `${base.replace('/design/', '/proto/')}?node-id=${nodeDir(node)}` : null,
+    nodeUrl: node ? `${base}?node-id=${nodeDir(node)}` : base };
 }
+
+// A capture is reused for REFIGMA_CACHE_MAX_AGE seconds (default 12h), then taken again; every answer states its age.
+const CACHE_MAX_AGE = +(process.env.REFIGMA_CACHE_MAX_AGE || 43200) * 1000;
+const capturedAt = dir => { for (const f of ['msg.json', 'msg.json.gz', 'index.html']) try { return fs.statSync(path.join(dir, f)).mtimeMs; } catch {} return 0; };
+const ago = ms => { const s = Math.round((Date.now() - ms) / 1000);
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : s < 129600 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
+const sourceNote = r => r.cached ? `cached, captured ${ago(capturedAt(r.dir))} ago — pass refresh=true if the design changed since` : `fresh, ${r.source}`;
 
 const run = (cmd, args, timeout = 240_000) => new Promise((resolve, reject) =>
   execFile(cmd, args, { timeout, env: ENV, maxBuffer: 64 << 20 }, (err, stdout, stderr) =>
     err ? reject(new Error((stderr || stdout || err.message).trim())) : resolve(stdout)));
 
 // One debug browser: every capture/read goes through one queue so nothing reads a half-written capture.
+// The queue orders this process; the lock file orders every refigma process on the machine (several Claude sessions
+// share one headless browser and one cache).
+const LOCK = path.join(os.homedir(), '.figma-local', 'capture.lock');
+async function withLock(fn) {
+  fs.mkdirSync(path.dirname(LOCK), { recursive: true });
+  for (const start = Date.now(); ;) {
+    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    let pid = 0, age = 0;
+    try { pid = +fs.readFileSync(LOCK, 'utf8'); age = Date.now() - fs.statSync(LOCK).mtimeMs; } catch { continue; }   // released meanwhile
+    let alive = false; try { process.kill(pid, 0); alive = true; } catch (e) { alive = e.code === 'EPERM'; }
+    if (!alive || age > 600_000) { try { fs.unlinkSync(LOCK); } catch {} continue; }   // holder died, or hung for 10 min
+    if (Date.now() - start > 300_000) throw new Error(`another refigma session (pid ${pid}) has held the capture lock for 5 minutes`);
+    await new Promise(r => setTimeout(r, 300));
+  }
+  try { return await fn(); }
+  finally { try { if (+fs.readFileSync(LOCK, 'utf8') === process.pid) fs.unlinkSync(LOCK); } catch {} }
+}
 let queue = Promise.resolve();
-const serial = fn => (queue = queue.then(fn, fn));
+const serial = fn => (queue = queue.then(() => withLock(fn), () => withLock(fn)));
 const has = (dir, f) => fs.existsSync(path.join(dir, f));
 const hasDoc = fdir => has(fdir, 'pages.json');
 
+// msg.json (the node + its dependencies, often 30-80MB) is kept gzipped (~20x smaller) once it has been extracted
+const msgPath = dir => ['msg.json', 'msg.json.gz'].map(f => path.join(dir, f)).find(f => fs.existsSync(f)) || null;
+function packMsg(dir) {
+  const src = path.join(dir, 'msg.json');
+  if (!fs.existsSync(src)) return;
+  const { mtime } = fs.statSync(src), gz = `${src}.gz`;
+  fs.writeFileSync(gz, zlib.gzipSync(fs.readFileSync(src)));
+  fs.utimesSync(gz, mtime, mtime);   // keeps the capture time
+  fs.rmSync(src);
+}
+const MSG_FILES = ['msg.json', 'msg.json.gz', 'extract.json', 'index.html'];
+
+// Outputs record the extractor that made them: after an update of extract.py a cached capture is re-generated from its
+// msg.json (seconds, no browser) instead of serving code from the old extractor.
+const EXTRACTOR = crypto.createHash('sha1').update(fs.readFileSync(LIB('extract.py'))).digest('hex').slice(0, 12);
+const stamp = dir => { const f = path.join(dir, 'extract.json');
+  if (fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf8')), extractor: EXTRACTOR })); };
+const currentExtract = dir => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'extract.json'), 'utf8')).extractor === EXTRACTOR; } catch { return false; } };
+
 async function extractFromMsg(t) {
-  fs.writeFileSync(path.join(t.dir, 'extract.json'), await run('python3', [LIB('extract.py'), path.join(t.dir, 'msg.json'), t.node, t.dir]));
+  fs.writeFileSync(path.join(t.dir, 'extract.json'), await run('python3', [LIB('extract.py'), msgPath(t.dir), t.node, t.dir]));
+  stamp(t.dir);
+  packMsg(t.dir);
 }
 
 // Data for a node, fastest source first. Both give the same code (byte-identical HTML/tree on the test frames):
@@ -61,8 +123,9 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
   const t = parseUrl(url, opts.node);
   if (!t.node) throw new Error('This tool needs a node: pass a link with ?node-id= (right-click a frame → Copy link to selection) or node_id');
   const pngOk = !opts.png || has(t.dir, 'frame.png');
-  if (!refresh && pngOk && has(t.dir, 'index.html') && has(t.dir, 'extract.json')) return { ...t, cached: true };
-  if (!refresh && pngOk && has(t.dir, 'msg.json')) { await extractFromMsg(t); return { ...t, cached: true }; }
+  const reuse = !refresh && pngOk && Date.now() - capturedAt(t.dir) < CACHE_MAX_AGE;
+  if (reuse && has(t.dir, 'index.html') && currentExtract(t.dir)) return { ...t, cached: true };
+  if (reuse && msgPath(t.dir)) { await extractFromMsg(t); return { ...t, cached: true }; }
   if (!opts.png && process.env.REFIGMA_SOURCE !== 'clipboard') {
     fs.mkdirSync(t.dir, { recursive: true });
     const msg = path.join(t.dir, 'msg.json');
@@ -72,16 +135,18 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
     }
     if (process.env.REFIGMA_PROTO === '1') {
       try {
-        const pdir = path.join(t.fdir, '_proto', t.node.replace(':', '-'));
+        const pdir = path.join(t.fdir, '_proto', nodeDir(t.node));
         fs.rmSync(pdir, { recursive: true, force: true });
-        await run('node', [LIB('capture.mjs'), `https://www.figma.com/proto/${t.file}/x?node-id=${t.node.replace(':', '-')}`, pdir], 90_000);
+        await run('node', [LIB('capture.mjs'), t.protoUrl, pdir], 90_000);
         await fromDoc(t, ['extract-dir', pdir, t.node, msg, t.file]);
         return { ...t, cached: false, source: 'prototype' };
       } catch (e) { if (/NOT_LOGGED_IN/.test(e.message)) throw e; }
     }
-    for (const f of ['msg.json', 'extract.json', 'index.html']) fs.rmSync(path.join(t.dir, f), { force: true });
+    for (const f of MSG_FILES) fs.rmSync(path.join(t.dir, f), { force: true });
   }
   await run(READER, [t.nodeUrl, t.dir]);
+  stamp(t.dir);
+  packMsg(t.dir);
   return { ...t, cached: false, source: 'clipboard' };
 });
 
@@ -101,20 +166,34 @@ const URL_ARG = z.string().describe('figma.com/design/... link (with ?node-id= f
 const NODE_ARG = z.string().optional().describe('Node id like "3685:53706" — overrides the node-id in the link');
 const REFRESH = z.boolean().optional().describe('Re-capture instead of using the cache (use after the design changed)');
 const componentFile = r => JSON.parse(read(r, 'extract.json')).component;
+// A PNG inlined into an answer must stay within what MCP clients accept (big frames at 2x run to 20+MB / 8000+px)
+const pngSize = f => { const b = fs.readFileSync(f); return { w: b.readUInt32BE(16), h: b.readUInt32BE(20), bytes: b.length }; };
+const inlinable = f => { const { w, h, bytes } = pngSize(f); return w <= 7900 && h <= 7900 && bytes <= 5 << 20; };
 
 const server = new McpServer({ name: 'refigma-mcp', version: '0.3.0' });
 
 server.registerTool('figma_get_metadata', {
   title: 'Outline of a Figma file / node',
   description: 'Without a node: lists every page of the file and the sections/frames of the recorded page(s) as sparse XML (id, name, type, x, y, width, height). With a node: the outline under it to `depth`. Use it to discover frame ids, then call the other tools with node_id. Pages load lazily in Figma: to outline another page, pass a link whose node-id is on that page with refresh=true.',
-  inputSchema: { url: URL_ARG, node_id: NODE_ARG, depth: z.number().int().positive().optional(), refresh: REFRESH },
-}, async ({ url, node_id, depth, refresh }) => {
+  inputSchema: { url: URL_ARG, node_id: NODE_ARG, depth: z.number().int().positive().optional(), refresh: REFRESH,
+    max_lines: z.number().int().positive().optional().describe('Truncate (default 1000 lines)') },
+}, async ({ url, node_id, depth, refresh, max_lines = 1000 }) => {
   try {
-    const t = await ensureDoc(url, refresh);
-    const node = (node_id || '').replace('-', ':');
-    const pages = node ? '' : await run('node', [LIB('doc.mjs'), 'pages', t.fdir]);
-    const outline = await run('node', [LIB('doc.mjs'), 'outline', t.fdir, node, String(depth || (node ? 3 : 2))]);
-    return text(`${pages ? `<pages>\n${pages}</pages>\n\n` : ''}${outline}`);
+    let t = await ensureDoc(url, refresh);
+    // the link's node-id is the default root; pages are listed unless a node_id was asked for explicitly
+    const node = node_id ? normNode(node_id) : t.node;
+    const pages = node_id ? '' : await run('node', [LIB('doc.mjs'), 'pages', t.fdir]);
+    const outlineOf = () => run('node', [LIB('doc.mjs'), 'outline', t.fdir, node || '', String(depth || (node ? 3 : 2))]);
+    let outline;
+    try { outline = await outlineOf(); }
+    catch (e) {   // the node's page was never recorded: open the node (Figma then loads its page) and record it
+      if (refresh || !/not on a captured page/.test(e.message)) throw e;
+      t = await ensureDoc(node_id ? parseUrl(url, node).nodeUrl : url, true);
+      outline = await outlineOf();
+    }
+    const lines = outline.split('\n');
+    const body = lines.slice(0, max_lines).join('\n') + (lines.length > max_lines ? `\n… truncated (${lines.length} lines total): pass a deeper node_id or a smaller depth` : '');
+    return text(`${pages ? `<pages>\n${pages}</pages>\n\n` : ''}${body}`);
   } catch (e) { return fail(e); }
 });
 
@@ -125,7 +204,7 @@ server.registerTool('figma_search', {
 }, async ({ url, query, limit, refresh }) => {
   try {
     const t = await ensureDoc(url, refresh);
-    return text(await run('node', [LIB('doc.mjs'), 'search', t.fdir, query, String(limit || 50)]) || 'no matches');
+    return text((await run('node', [LIB('doc.mjs'), 'search', t.fdir, query, String(limit || 50)])).trim() || `no layer named like "${query}" (this searches layer names, not text content)`);
   } catch (e) { return fail(e); }
 });
 
@@ -138,7 +217,7 @@ server.registerTool('figma_get_node', {
     const r = await capture(url, refresh, { node: node_id });
     const lines = read(r, 'tree.txt').split('\n');
     const body = lines.slice(0, max_lines).join('\n') + (lines.length > max_lines ? `\n… truncated (${lines.length} lines total)` : '');
-    return text(`file=${r.file} node=${r.node} ${r.cached ? '(cached)' : `(fresh, ${r.source})`} dir=${r.dir}\nlegend: WxH @x,y [dir gap pad=T R B L justify align size=main/cross] fill-main/fill-cross=stretch, colors #HEX(token), style{...}=Figma style names, on:event→action(target transition)\n\n${body}`);
+    return text(`file=${r.file} node=${r.node} (${sourceNote(r)}) dir=${r.dir}\nlegend: WxH @x,y [dir gap pad=T R B L justify align size=main/cross] fill-main/fill-cross=stretch, colors #HEX(token), style{...}=Figma style names, on:event→action(target transition)\n\n${body}`);
   } catch (e) { return fail(e); }
 });
 
@@ -148,12 +227,12 @@ server.registerTool('figma_get_nodes', {
   inputSchema: { url: URL_ARG, node_ids: z.array(z.string()).min(1), max_lines_each: z.number().int().positive().optional() },
 }, async ({ url, node_ids, max_lines_each = 400 }) => {
   try {
-    const ids = [...new Set(node_ids.map(id => id.replace('-', ':')))];
     const errors = {}, source = {};
+    const ids = [...new Set(node_ids.map(id => { try { return normNode(id); } catch (e) { errors[id] = e.message; return id; } }))];
     // Nodes on a recorded page: decode the page once for all of them, then build their outputs in parallel.
     await serial(async () => {
       const t = parseUrl(url);
-      const todo = ids.filter(id => { const d = parseUrl(url, id).dir; return !(has(d, 'tree.txt') && has(d, 'extract.json')) && !has(d, 'msg.json'); });
+      const todo = ids.filter(id => !errors[id]).filter(id => { const d = parseUrl(url, id).dir; return Date.now() - capturedAt(d) >= CACHE_MAX_AGE || (!(has(d, 'tree.txt') && currentExtract(d)) && !msgPath(d)); });
       if (!todo.length || !hasDoc(t.fdir)) return;
       const res = JSON.parse(await run('node', [LIB('doc.mjs'), 'extract-many', t.fdir, t.file, ...todo.map(id => `${id}=${path.join(parseUrl(url, id).dir, 'msg.json')}`)]));
       const ok = todo.filter(id => !res[id]?.error);
@@ -162,7 +241,7 @@ server.registerTool('figma_get_nodes', {
         try {
           await extractFromMsg(r);
           // an image without a URL: leave the node to capture(), which falls back to a live capture
-          if ((JSON.parse(read(r, 'extract.json')).images_missing || []).length) for (const f of ['msg.json', 'extract.json', 'index.html']) fs.rmSync(path.join(r.dir, f), { force: true });
+          if ((JSON.parse(read(r, 'extract.json')).images_missing || []).length) for (const f of MSG_FILES) fs.rmSync(path.join(r.dir, f), { force: true });
           else source[id] = 'document';
         } catch (e) { errors[id] = e.message; }
       }));
@@ -173,7 +252,7 @@ server.registerTool('figma_get_nodes', {
         if (errors[id]) throw new Error(errors[id]);
         const r = source[id] ? { ...parseUrl(url, id), source: source[id] } : await capture(url, false, { node: id });
         const lines = read(r, 'tree.txt').split('\n');
-        parts.push(`### node ${r.node} (${r.cached ? 'cached' : r.source})\n` + lines.slice(0, max_lines_each).join('\n') + (lines.length > max_lines_each ? `\n… truncated (${lines.length} lines)` : ''));
+        parts.push(`### node ${r.node} (${sourceNote(r)})\n` + lines.slice(0, max_lines_each).join('\n') + (lines.length > max_lines_each ? `\n… truncated (${lines.length} lines)` : ''));
       } catch (e) { parts.push(`### node ${id}\nERROR: ${e.message}`); }
     }
     return text(parts.join('\n\n'));
@@ -189,7 +268,7 @@ server.registerTool('figma_get_code', {
     const r = await capture(url, refresh, { node: node_id });
     const f = format === 'react' ? componentFile(r) : 'index.html';
     const p = path.join(r.dir, f);
-    return text(path_only ? p : `${p}\n\n${read(r, f)}`);
+    return text(path_only ? p : `${p} (${sourceNote(r)})\n\n${read(r, f)}`);
   } catch (e) { return fail(e); }
 });
 
@@ -204,13 +283,19 @@ server.registerTool('figma_get_assets', {
     const icons = list('icons'), images = list('images');
     let note = '';
     if (dest) {
+      // relative to the client's working directory (the project) — the server's own cwd is not meaningful to the caller
+      const root = path.resolve(process.env.PWD || process.cwd(), dest), replaced = [];
       for (const [sub, files] of [['icons', icons], ['images', images]]) {
-        fs.mkdirSync(path.join(dest, sub), { recursive: true });
-        for (const f of files) fs.copyFileSync(f, path.join(dest, sub, path.basename(f)));
+        fs.mkdirSync(path.join(root, sub), { recursive: true });
+        for (const f of files) {
+          const to = path.join(root, sub, path.basename(f));
+          if (fs.existsSync(to) && !fs.readFileSync(to).equals(fs.readFileSync(f))) replaced.push(to);
+          fs.copyFileSync(f, to);
+        }
       }
-      note = `\ncopied to ${dest}/icons and ${dest}/images`;
+      note = `\ncopied to ${root}/icons and ${root}/images` + (replaced.length ? `\nreplaced ${replaced.length} different file(s) with the same name:\n${replaced.join('\n')}` : '');
     }
-    return text(`icons (${icons.length}):\n${icons.join('\n')}\n\nimages (${images.length}):\n${images.join('\n')}${note}`);
+    return text(`${sourceNote(r)}\nicons (${icons.length}):\n${icons.join('\n')}\n\nimages (${images.length}):\n${images.join('\n')}${note}`);
   } catch (e) { return fail(e); }
 });
 
@@ -222,13 +307,13 @@ server.registerTool('figma_export', {
   try {
     const t = parseUrl(url);
     // export from the frame capture that contains the node; fall back to capturing the node itself
-    let r = t.node && has(t.dir || '', 'index.html') ? { ...t } : await capture(url, false, { node: node_id });
-    const id = (node_id || r.node).replace('-', ':');
+    let r = await capture(url, false, t.node ? {} : { node: node_id });
+    const id = normNode(node_id) || r.node;
     if (!fs.readFileSync(path.join(r.dir, 'index.html'), 'utf8').includes(`data-id="${id}"`)) r = await capture(url, false, { node: id });
-    const out = dest || path.join(r.dir, 'exports', `${id.replace(':', '-')}@${scale}x.${format}`);
+    const out = dest || path.join(r.dir, 'exports', `${nodeDir(id)}@${scale}x.${format}`);
     const res = JSON.parse(await run('node', [LIB('export.mjs'), r.dir, id === r.node ? 'root' : id, format, String(scale), out], 180_000));
     const content = [{ type: 'text', text: `${res.out} (${res.width}x${res.height}, ${format} @${scale}x)` }];
-    if (format === 'png' && res.width * res.height < 9e6) content.push({ type: 'image', data: fs.readFileSync(res.out).toString('base64'), mimeType: 'image/png' });
+    if (format === 'png' && inlinable(res.out)) content.push({ type: 'image', data: fs.readFileSync(res.out).toString('base64'), mimeType: 'image/png' });
     return { content };
   } catch (e) { return fail(e); }
 });
@@ -269,15 +354,21 @@ server.registerTool('figma_get_image', {
     const r = await capture(url, refresh, { node: node_id, png: true });
     const png = path.join(r.dir, 'frame.png');
     if (!fs.existsSync(png)) return fail(new Error('Figma PNG not captured. Retry with refresh=true, or use figma_export.'));
-    return { content: [{ type: 'image', data: fs.readFileSync(png).toString('base64'), mimeType: 'image/png' }, { type: 'text', text: png }] };
+    if (!inlinable(png)) { const { w, h, bytes } = pngSize(png);
+      return text(`${png} (${sourceNote(r)})\n${w}x${h}, ${(bytes / 1e6).toFixed(1)}MB: too large to inline — open the file, or use figma_export with a node_id inside it`); }
+    return { content: [{ type: 'image', data: fs.readFileSync(png).toString('base64'), mimeType: 'image/png' }, { type: 'text', text: `${png} (${sourceNote(r)})` }] };
   } catch (e) { return fail(e); }
 });
 
 server.registerTool('figma_compare', {
   title: 'Pixel-diff an implementation against the Figma node',
   description: "Renders target (a URL such as http://localhost:5173/page, an HTML file, or \"react\" for the generated component; default: the generated HTML) at the node's size in an sRGB headless Edge and diffs it with Figma's PNG. Returns match %, worst regions and the diff image (red = mismatch). Iterate until ~99.9%.",
-  inputSchema: { url: URL_ARG, node_id: NODE_ARG, target: z.string().optional(), refresh: REFRESH },
-}, async ({ url, node_id, target, refresh }) => {
+  inputSchema: { url: URL_ARG, node_id: NODE_ARG, target: z.string().optional(), refresh: REFRESH,
+    selector: z.string().optional().describe('CSS selector of the element to diff when target is a page of a running app'),
+    viewport: z.string().regex(/^\d+x\d+$/).optional().describe('Page size with a selector, e.g. 1440x1024 (default)'),
+    local_storage: z.record(z.string(), z.any()).optional().describe('Entries written to localStorage before the page loads (e.g. an auth token, for pages behind a login)'),
+    settle_ms: z.number().int().nonnegative().max(30000).optional().describe('Wait after load for client-side rendering (default 400; 2500 for react)') },
+}, async ({ url, node_id, target, refresh, selector, viewport, local_storage, settle_ms }) => {
   try {
     const r = await capture(url, refresh, { node: node_id, png: true });
     const png = path.join(r.dir, 'frame.png');
@@ -285,10 +376,14 @@ server.registerTool('figma_compare', {
     const { w, h } = JSON.parse(read(r, 'extract.json'));
     let file = target || path.join(r.dir, 'index.html');
     const env = { ...ENV };
+    if (selector) env.COMPARE_SELECTOR = selector;
+    if (viewport) env.COMPARE_VIEWPORT = viewport;
+    if (local_storage) env.COMPARE_STORAGE = JSON.stringify(local_storage);
+    if (settle_ms !== undefined) env.SETTLE_MS = String(settle_ms);
     if (target === 'react') {
       file = path.join(r.dir, 'react.html');
       await run('node', [LIB('render-tsx.mjs'), path.join(r.dir, componentFile(r)), file]);
-      env.SETTLE_MS = '2500';   // Tailwind Play CDN compiles classes after load
+      env.SETTLE_MS ||= '2500';   // Tailwind Play CDN compiles classes after load
     }
     const out = path.join(r.dir, 'compare', target ? (target === 'react' ? 'react' : 'target') : 'generated');
     const res = await new Promise((resolve, reject) => execFile('node', [LIB('compare.mjs'), file, png, String(w), String(h), out],
@@ -296,7 +391,7 @@ server.registerTool('figma_compare', {
     const regions = res.worstRegions.map(c => `  x=${c.x} y=${c.y} ${c.w}x${c.h}: ${c.pct}% differs`).join('\n');
     return { content: [
       { type: 'text', text: `match ${res.match}% (${res.diffPixels} px differ)\nworst regions:\n${regions || '  none'}\nrender: ${res.render}\ndiff: ${res.diff}` },
-      { type: 'image', data: fs.readFileSync(res.diff).toString('base64'), mimeType: 'image/png' },
+      ...(inlinable(res.diff) ? [{ type: 'image', data: fs.readFileSync(res.diff).toString('base64'), mimeType: 'image/png' }] : []),
     ] };
   } catch (e) { return fail(e); }
 });
@@ -314,9 +409,10 @@ server.registerTool('figma_status', {
   description: 'Headless browser state, recorded documents and cached captures.',
   inputSchema: {},
 }, async () => {
-  const files = fs.existsSync(CACHE) ? fs.readdirSync(CACHE) : [];
-  const lines = files.map(f => {
-    const nodes = fs.readdirSync(path.join(CACHE, f)).filter(n => /^\d+-\d+$/.test(n)).map(n => n.replace('-', ':'));
+  const dirs = p => { try { return fs.readdirSync(p, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { return []; } };
+  const lines = dirs(CACHE).map(f => {
+    const nodes = dirs(path.join(CACHE, f)).filter(n => /^I?\d+-\d+(;\d+-\d+)*$/.test(n))
+      .map(n => `${n.replaceAll('-', ':')} (${ago(capturedAt(path.join(CACHE, f, n)))} ago)`);
     return `${f}: document ${hasDoc(path.join(CACHE, f)) ? 'recorded' : 'no'}, captured nodes: ${nodes.join(', ') || 'none'}`;
   });
   let browser = 'headless browser not running (starts automatically on the next capture)';

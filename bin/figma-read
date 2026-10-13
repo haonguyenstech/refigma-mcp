@@ -7,7 +7,7 @@ set -euo pipefail
 export NODE_OPTIONS="${NODE_OPTIONS:-} --max-semi-space-size=64"
 URL="$1"; D="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 NODE=$(python3 -c "import sys,urllib.parse as u;q=u.parse_qs(u.urlparse(sys.argv[1]).query);print(q['node-id'][0].replace('-',':'))" "$URL")
-FILE=$(python3 -c "import sys,re;print(re.search(r'/(?:design|file|proto)/([A-Za-z0-9]+)',sys.argv[1]).group(1))" "$URL")
+FILE=$(python3 -c "import sys,re;m=re.search(r'/(?:design|file|proto)/([A-Za-z0-9]+)(?:/branch/([A-Za-z0-9]+))?',sys.argv[1]);print(m.group(2) or m.group(1))" "$URL")
 FDIR="$HOME/.figma-local/out/$FILE"
 OUT="${2:-$FDIR/${NODE//:/-}}"; mkdir -p "$OUT"
 rm -rf "$FDIR/_doc/_new"
