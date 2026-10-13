@@ -1,95 +1,265 @@
 # refigma-mcp
 
-Read Figma frames from an AI agent **without the REST API, plugins, or a paid seat**. Works on
-View/Collab seats, which are otherwise limited to ~20 REST reads per month and can't run plugins.
+**Read Figma frames from an AI agent without the REST API, plugins, or a paid seat.**
 
-How: a private **headless** Edge (no window, no Figma Desktop; `lib/browser.mjs`, CDP `:9334`) opens the link, Figma's own copy handler is triggered on the
-selected node, and the clipboard payload (`fig-kiwi` binary) is decoded locally into a layout tree.
+An [MCP](https://modelcontextprotocol.io) server that turns a Figma link into a layout tree, pixel-faithful HTML / React + Tailwind,
+SVG icons, design tokens and Figma's own PNG, then checks your implementation against that PNG pixel by pixel.
 
-## Tools
+![MCP server](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)
+![Node](https://img.shields.io/badge/node-%E2%89%A522.15-339933?logo=node.js&logoColor=white)
+![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-Microsoft%20Edge-0078D7?logo=microsoftedge&logoColor=white)
+![Fidelity](https://img.shields.io/badge/pixel%20match-99.07%E2%80%9399.98%25-success)
 
-| Tool | Returns |
-| --- | --- |
-| `figma_get_metadata(url, node_id?, depth?)` | Pages of the file + sparse XML outline (id, name, type, x, y, w, h) of the recorded page(s) or under a node. |
-| `figma_search(url, query)` | Layers matching a name, with path. |
-| `figma_get_node(url, node_id?)` | Layout tree: auto-layout, sizes, fills with token names, strokes, radius, shadows, typography, text, **style names**, **prototype interactions**, **hover variants**, **annotations**. |
-| `figma_get_nodes(url, node_ids[])` | Several trees at once; nodes on a recorded page come from the document in seconds. |
-| `figma_get_code(url, format=html\|react)` | Deterministic HTML/CSS or React + Tailwind (arbitrary values), incl. `:hover` + transitions from prototype hover variants. |
-| `figma_get_assets(url, dest?)` | SVG icons from vector geometry (named after components) + original images. |
-| `figma_export(url, node_id?, png\|jpg\|pdf, scale)` | Any node at 1x–4x; PNG transparent, PDF vector — rendered from the verified HTML. |
-| `figma_get_tokens(url)` | Variables (CSS var, rendered value, per-mode values) + named text/fill/effect styles with values. |
-| `figma_get_image(url)` | Figma's own 1x PNG (ground truth). |
-| `figma_compare(url, target?)` | Pixel diff of a URL / HTML file / `react` vs Figma's PNG: match %, worst regions, diff image. |
-| `figma_relogin()` | Re-imports the figma.com session from the real Edge profile (Keychain prompt). |
-| `figma_status()` | Browser, recorded documents, cached captures. |
+|  | Figma REST API | Figma plugin | **refigma-mcp** |
+| --- | --- | --- | --- |
+| View / Collab seat | ~20 reads / month | can't run | **no quota** |
+| Needs | a token | an Edit seat | a figma.com login in Edge |
+| Code out of the box | no | depends on the plugin | **HTML/CSS, React + Tailwind, SVG** |
+| Verify an implementation | no | no | **pixel diff vs Figma's PNG** |
 
-Measured on the test frame: generated HTML **and** React+Tailwind both match Figma's render at **99.975%** of pixels.
+---
 
-## How a capture works
+## Contents
 
-`lib/capture.mjs` drives the headless Edge over one CDP session (`REFIGMA_CDP=9222` to watch it in the visible debug Edge):
-- blocks FigmaAgent (`127.0.0.1:44950`), so Figma Desktop never pops up, and closes the resulting
-  "Need to use the desktop app or installed fonts?" dialog (it steals focus from the Copy-as-PNG shortcut);
-- the headless browser uses a normal Edge user agent (Figma's CDN rejects `HeadlessChrome`) and no automation flag;
-- auto-attaches workers and records the multiplayer WebSocket: a `fig-wire` schema frame + `NODE_CHANGES`
-  holding the entire loaded page (≈150k nodes incl. all components, variables, vector blobs) → `lib/doc.mjs`;
-- triggers Figma's own copy handler (`execCommand('copy')` on `input.focus-target`) for the node and Copy-as-PNG.
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Tools](#tools)
+- [Fidelity](#fidelity)
+- [Speed](#speed)
+- [Reliability and safety](#reliability-and-safety)
+- [Configuration](#configuration)
+- [CLI](#cli)
+- [Development](#development)
+- [Limitations](#limitations)
 
-## Speed
+## Quick start
 
-Measured on a 154k-node file (View seat):
-
-| Call | Time |
-| --- | --- |
-| Node on a page recorded in the last 30 min (`REFIGMA_DOC_MAX_AGE`), incl. `figma_get_nodes` batches | ~3-5s (no browser; the page is decoded once per batch) |
-| First node of a page / older recording (live capture: Figma's copy data + PNG) | ~25-35s, mostly Figma: ~10s for the server to send the page, ~11s for its own JS to load it |
-| `figma_get_metadata` / `figma_search` on a new page (document only) | ~12s |
-| Anything captured in the last 12h (`REFIGMA_CACHE_MAX_AGE`, seconds) | instant (cache); every answer states the capture's age |
-
-Both sources produce the same code: style references (library shadow / image fill / text styles) are resolved to the
-style's current values for every node and instance override. Figma's copy handler skips them inside overrides, so
-this also fixes clipboard output. A recorded document is only used when every image of the node has a URL; otherwise
-the node is captured live. `REFIGMA_SOURCE=clipboard` forces live captures. `REFIGMA_PROTO=1` (experimental) tries
-the prototype viewer first, which loads just the frame (~1MB instead of the whole page), but timing varies (10-25s)
-and images the browser already cached are not seen.
-
-Captures are serialized across every refigma process on the machine (`~/.figma-local/capture.lock`), each capture
-uses a tab of its own that it closes, and outputs record the extractor version: after an update of `lib/extract.py` a
-cached capture is re-generated from its `msg.json.gz` instead of serving old code. `figma_compare` can diff one element
-of a running app (`selector`, `viewport`, `local_storage` for pages behind a login, `settle_ms`).
-
-## What makes it faithful
-
-- Instances are expanded the way Figma does: `guidPath` overrides (instance boundaries only), component properties
-  (boolean / text / instance swap, defaults from the component set), variant swaps reset to the new variant's styling.
-- Variable-bound colours are resolved through alias chains in the active mode — the paint's cached colour can be stale;
-  a bound colour's alpha is mirrored into the paint opacity by Figma and is applied once.
-- Component property values are read from `value` or, in newer files, `varValue` (incl. variable-bound booleans).
-- A style reference wins over cached paints, also across several override entries of one node and in text runs.
-- Rotations and flips use the full transform matrix; in auto layout the rotated bounding box takes the slot.
-- Strokes paint above children (outline, or an `::after` border for per-side strokes); "first on top" stacks are isolated.
-- Mask layers clip the layers above them; arcs (pie / donut), per-corner radii, paragraph spacing and text shadows render.
-- `stackReverseZIndex` ("first on top") becomes z-index; uniform strokes become `outline` with negative offset
-  (no layout impact, painted above children, like Figma); gradient strokes use a masked `::before`.
-- Comparison runs in a separate headless Edge with `--force-color-profile=srgb`: macOS Edge otherwise renders in
-  Display P3 and every saturated colour is off.
-
-## Setup
+**Requirements:** macOS, Microsoft Edge signed in to figma.com, Node ≥ 22.15, Python 3 with `cryptography`, `curl`.
 
 ```bash
-npm install
+git clone https://github.com/haonguyenstech/refigma-mcp ~/coding/js/refigma-mcp
+cd ~/coding/js/refigma-mcp && npm install
 claude mcp add -s user refigma-mcp -- node ~/coding/js/refigma-mcp/server.mjs
 ```
 
-The headless browser takes the figma.com session from the debug Edge if it is running, else from the real
-Microsoft Edge profile (one Keychain prompt). `figma_relogin` refreshes it from the real Edge. CLI: `bin/figma-read <url> [outdir]`.
+Then give the agent a link — right-click a frame in Figma → **Copy link to selection**:
 
-## Caveats
+> Implement this design: https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706
 
-- Relies on Figma's undocumented clipboard format; may break when Figma changes it.
-- Figma loads pages lazily: metadata/search cover the page(s) loaded by the last capture.
-- FigJam: geometry renderer started (`figjam_svg`), not finished/verified yet.
-- Fonts missing from Google Fonts fall back; boolean SUBTRACT/INTERSECT use SVG masks (approximate for exotic cases).
-- A static frame has no hover/responsive behaviour; sizes are exact px with hug/fill recorded in the tree.
-- Images whose URL isn't in the clipboard are fetched via REST image-fills (Tier 2: per-minute quota) with `FIGMA_API_KEY`/`FIGMA_ACCESS_TOKEN`;
-  the response is cached per file for 12h and image files are shared per file in `~/.figma-local/out/<file>/_images`.
+On the first capture the server copies your figma.com session from Edge. macOS shows a Keychain prompt for
+**Microsoft Edge Safe Storage**: click **Allow**. If captures later report `NOT_LOGGED_IN`, run `figma_relogin`.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Figma link] --> B{fresh cache?}
+    B -- yes --> OUT
+    B -- no --> C{page recorded in<br/>the last 30 min?}
+    C -- yes --> D[page document<br/>no browser, ~3-5s]
+    C -- no --> E[live capture<br/>headless Edge, ~25-35s]
+    E --> F[Figma's copy handler<br/>fig-kiwi + PNG]
+    E --> G[multiplayer socket<br/>whole page, ~150k nodes]
+    G -. recorded for next time .-> D
+    F --> X[extract.py]
+    D --> X
+    X --> OUT[tree.txt · index.html · Component.tsx<br/>assets/ · tokens.json · frame.png]
+```
+
+A private **headless** Edge (no window, no Figma Desktop, CDP on `:9334`) opens the link in its own tab and:
+
+- blocks FigmaAgent (`127.0.0.1:44950`), so Figma Desktop never pops up, and closes the
+  *"Need to use the desktop app or installed fonts?"* dialog that would steal focus from Copy-as-PNG;
+- uses a normal Edge user agent (Figma's CDN rejects `HeadlessChrome`) and no automation flag;
+- records the multiplayer WebSocket: a `fig-wire` schema frame plus `NODE_CHANGES` with the whole loaded page,
+  including components, variables and vector blobs;
+- triggers Figma's own copy handler (`execCommand('copy')` on `input.focus-target`) and Copy-as-PNG for the node.
+
+The clipboard payload and the page document are decoded locally (`kiwi-schema`, zstd / deflate) and turned into a
+normalized model, then into code.
+
+## Tools
+
+Every tool takes a `figma.com/design/…` link; branch links (`…/branch/<key>/…`) read the branch. `node_id` accepts
+`3685:53706`, `3685-53706` and instance ids (`I123:45;67:89`) and overrides the link's `node-id`. `refresh: true`
+captures again instead of using the cache. Every answer states where the data came from and how old it is.
+
+### Read the design
+
+| Tool | Returns |
+| --- | --- |
+| `figma_get_metadata(url, node_id?, depth?, max_lines?)` | The file's pages and a sparse XML outline (id, name, type, x, y, w, h) under the link's node. Records the node's page if it was not recorded yet. Truncated at 1000 lines. |
+| `figma_search(url, query, limit?)` | Layers whose **name** matches (not text content), with their path, on the recorded pages. |
+| `figma_get_node(url, node_id?, max_lines?)` | The layout tree: auto layout, sizes, fills with token names, strokes, radius, shadows, typography, text, style names, prototype interactions, hover variants, Dev Mode annotations. Start here. |
+| `figma_get_nodes(url, node_ids[], max_lines_each?)` | Several trees at once; nodes on a recorded page come from the document in seconds; an invalid id fails alone. |
+| `figma_get_tokens(url)` | Variables (CSS variable, rendered value, values per mode) and the named text / fill / effect styles in use. |
+
+### Generate
+
+| Tool | Returns |
+| --- | --- |
+| `figma_get_code(url, format=html\|react, path_only?)` | Deterministic HTML/CSS, or a React component with Tailwind arbitrary values, incl. `:hover` rules and transitions from prototype hover variants. |
+| `figma_get_assets(url, dest?)` | SVG icons built from vector geometry (named after their components) and the original images. A relative `dest` is resolved against your working directory; replaced files are listed. |
+| `figma_export(url, node_id?, format=png\|jpg\|pdf, scale?, dest?)` | Any node at 1x–4x: transparent PNG, JPG or vector PDF, rendered from the verified HTML. |
+
+### Verify
+
+| Tool | Returns |
+| --- | --- |
+| `figma_get_image(url)` | Figma's own 1x PNG of the node — the ground truth. Images over 7900px or 5MB come back as a path. |
+| `figma_compare(url, target?, selector?, viewport?, local_storage?, settle_ms?)` | Renders `target` (a URL, an HTML file, or `react`; default: the generated HTML) in an sRGB headless Edge and diffs it with Figma's PNG: match %, the worst regions and a diff image. |
+
+`figma_compare` against a running app:
+
+```jsonc
+{
+  "url": "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706",
+  "target": "http://localhost:5173/notifications",
+  "selector": "[data-testid=notification-popover]", // diff just this element
+  "viewport": "1440x1024",
+  "local_storage": { "token": "<access token>" },  // for pages behind a login
+  "settle_ms": 1500                                 // wait for client-side rendering
+}
+```
+
+### Session
+
+| Tool | Does |
+| --- | --- |
+| `figma_relogin()` | Copies the figma.com session from your real Edge profile again (Keychain prompt) and checks it. |
+| `figma_status()` | The headless browser, recorded documents, and cached captures with their age. |
+
+## Fidelity
+
+Generated HTML compared with Figma's PNG, on 12 frames of two production files:
+
+| Frames | Before the pixel-bench fixes | Now |
+| --- | ---: | ---: |
+| Modal with variant-driven icons | 58.8% | **99.83%** |
+| Code / XML viewer | 65.0% | **99.40%** |
+| Page with rotated scroll bars | 92.5% | **99.91%** |
+| Notification popover | 97.1% | **99.07%** |
+| The other 8 | 98.9–99.98% | **99.07–99.98%** |
+
+React + Tailwind renders pixel-identical to the HTML on the frames checked. The remaining difference is mostly
+text anti-aliasing and font metrics.
+
+<details>
+<summary><b>What makes it faithful</b></summary>
+
+- **Instances are expanded the way Figma does it:** `guidPath` overrides at instance boundaries only; component
+  properties (boolean / text / instance swap), with defaults from the component set; values read from `value` or, in
+  newer files, `varValue` (incl. variable-bound booleans). Variant swaps reset to the new variant's styling.
+- **Styles win over cached paints:** library shadow, image fill and text style references resolve to the style's
+  current values, for every node, across several override entries of one node, and in text runs. Figma's copy
+  handler skips them inside overrides, so this fixes clipboard output too.
+- **Variables:** bound colours resolve through alias chains in the active mode (a paint's cached colour can be stale).
+  Figma mirrors a bound colour's alpha into the paint opacity; it is applied once. A token painted in another mode
+  inside the frame keeps its own colour.
+- **Transforms:** rotations and flips use the full matrix; in auto layout the rotated bounding box takes the slot.
+- **Strokes paint above children,** like Figma's: uniform strokes become `outline` with a negative offset (no layout
+  impact), per-side strokes an `::after` border, gradient strokes a masked `::before`.
+- **Layer order:** "first on top" stacks become z-index inside an isolated stacking context, so it stays local.
+- **Shapes:** mask layers clip the layers above them; arcs (pie / donut); per-corner radii in SVG; SUBTRACT /
+  INTERSECT through SVG masks; unique, stable SVG ids.
+- **Text:** mixed runs, paragraph spacing, wrapping of over-long words, truncation with line clamp, text shadows.
+- **Colour:** comparison renders with `--force-color-profile=srgb`; macOS Edge otherwise renders in Display P3 and
+  every saturated colour is off.
+
+</details>
+
+## Speed
+
+Measured on a 154k-node file with a View seat:
+
+| Call | Time |
+| --- | --- |
+| Anything captured in the last 12h | instant (cache) |
+| Node on a page recorded in the last 30 min, incl. `figma_get_nodes` batches | ~3-5s, no browser |
+| First node of a page, or an older recording (live capture) | ~25-35s, mostly Figma: ~10s to send the page, ~11s to load it |
+| `figma_get_metadata` / `figma_search` on a new page | ~12s |
+| `figma_compare` | ~4s; ~15s for a 3442×1740 frame at 2x |
+
+A recorded document is only used when every image of the node has a URL; otherwise the node is captured live.
+
+## Reliability and safety
+
+- **Several sessions at once:** captures are serialized across every refigma process on the machine
+  (`~/.figma-local/capture.lock`); each capture works in a tab of its own and closes it; renders use a random port.
+- **No stale code:** captures expire after 12h, and outputs record the extractor version — after an update of
+  `lib/extract.py`, a cached capture is re-generated from its `msg.json.gz` in seconds instead of serving old code.
+- **Nothing hangs:** every browser call has a timeout; a lost connection, a signal or an error ends the capture with
+  a clear message and closes its tab; a killed render never leaves Edge running.
+- **Design content is untrusted:** node ids are validated (they become paths) and links must be figma.com; layer names,
+  links and font names are escaped in HTML, CSS and TSX; image downloads are pinned to Figma's hosts; the generated
+  component is only transpiled in Node and rendered in the sandboxed browser.
+
+## Configuration
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `REFIGMA_CACHE_MAX_AGE` | `43200` (12h) | Seconds a node capture is reused before it is taken again. |
+| `REFIGMA_DOC_MAX_AGE` | `1800` | Seconds a recorded page document may serve node data. |
+| `REFIGMA_SOURCE=clipboard` | — | Always capture live, never from a recorded document. |
+| `REFIGMA_PROTO=1` | — | Experimental: try the prototype viewer first (just the frame, ~1MB; 10-25s; misses images the browser already cached). |
+| `REFIGMA_LOAD_TIMEOUT` | `150` | Seconds a capture waits for the editor and the page document. |
+| `REFIGMA_PORT` | `9334` | CDP port of the headless capture browser. |
+| `REFIGMA_CDP` | — | Capture in another browser, e.g. `9222` to watch it in a visible debug Edge. |
+| `REFIGMA_BROWSER` | Microsoft Edge | Browser executable for capture and rendering. |
+| `REFIGMA_EDGE_PROFILE` | `~/Library/Application Support/Microsoft Edge/Default` | Profile the figma.com session is copied from. |
+| `FIGMA_API_KEY` / `FIGMA_ACCESS_TOKEN` | — | Fallback for images whose URL was never seen (REST image-fills, Tier 2 quota; cached per file for 12h). |
+| `REFIGMA_TRACE=1` | — | Timing trace of a capture on stderr. |
+
+**Cache** — `~/.figma-local/out/<file key>/`:
+
+```text
+<node id>/       tree.txt  index.html  <Component>.tsx  assets/  tokens.json  frame.png  msg.json.gz
+_doc/<page id>/  recorded page document (schema + frames, outline, image URLs)
+_images/         images shared by every node of the file
+```
+
+Deleting any of it is safe: it is captured again on the next call.
+
+## CLI
+
+```bash
+bin/figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
+```
+
+Writes the same outputs as the server (default `~/.figma-local/out/<file>/<node>`).
+
+## Development
+
+```text
+server.mjs          MCP tools, cache, lock, source selection
+lib/capture.mjs     drives the headless Edge: page document + copy data + PNG
+lib/browser.mjs     the headless capture browser and its figma.com session (cookies.py decrypts Edge's cookies)
+lib/doc.mjs         recorded page documents: ingest, outline, search, node extraction
+lib/decode.mjs      Figma clipboard HTML → JSON message
+lib/extract.py      message → model → tree.txt, HTML/CSS, React + Tailwind, SVG, tokens, images
+lib/headless.mjs    throwaway sRGB render browser (compare, export)
+lib/compare.mjs     render + pixel diff · lib/export.mjs  PNG / JPG / PDF · lib/render-tsx.mjs  React → page
+```
+
+**Check a change to `lib/extract.py` against every cached frame** — regenerating is cheap:
+
+```bash
+mkdir -p /tmp/out && python3 lib/extract.py <capture dir>/msg.json.gz <node id> /tmp/out > /tmp/out/extract.json
+node lib/compare.mjs /tmp/out/index.html <capture dir>/frame.png <w> <h> /tmp/out/cmp   # w, h from extract.json
+```
+
+Run-to-run render noise is about ±0.001%. Accept a change only when no frame gets worse.
+
+## Limitations
+
+- Relies on Figma's undocumented clipboard and multiplayer formats; a Figma release can break it.
+- Figma loads pages lazily: `figma_search` covers the pages recorded so far; `figma_get_metadata` records a node's
+  page on demand.
+- Not rendered yet: grid auto layout (children keep their absolute positions), angular / diamond gradients inside SVG
+  icons, image fill opacity / crop / tile scale, corner smoothing (plain radius), vector masks in HTML (their box),
+  boolean EXCLUDE (drawn like UNION). FigJam is started (`figjam_svg`) but not verified.
+- Fonts missing from Google Fonts fall back to the browser's.
+- A frame is static: no responsive behaviour; sizes are exact px, with hug / fill recorded in the tree.
+- **Security:** the capture browser's CDP port (`:9334`) has no authentication and holds a signed-in figma.com
+  session, so any local process can drive it.
