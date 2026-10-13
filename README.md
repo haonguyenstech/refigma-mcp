@@ -5,7 +5,7 @@
 An [MCP](https://modelcontextprotocol.io) server that turns a Figma link into a layout tree, pixel-faithful HTML / React + Tailwind,
 SVG icons, design tokens and Figma's own PNG, then checks your implementation against that PNG pixel by pixel.
 
-[![npm](https://img.shields.io/npm/v/refigma-mcp?color=cb3837&logo=npm)](https://www.npmjs.com/package/refigma-mcp)
+[![Release](https://img.shields.io/github/v/release/haonguyenstech/refigma-mcp?color=cb3837&logo=github)](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
 ![MCP server](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.15-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
@@ -40,17 +40,20 @@ SVG icons, design tokens and Figma's own PNG, then checks your implementation ag
 **Requirements:** macOS, Microsoft Edge signed in to figma.com, Node ≥ 22.15, Python 3 with `cryptography`, `curl`.
 
 ```bash
-claude mcp add -s user refigma-mcp -- npx -y refigma-mcp
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz
 ```
 
-Any other MCP client takes the same command:
+The package is the `.tgz` attached to each [GitHub release](https://github.com/haonguyenstech/refigma-mcp/releases):
+`npx` downloads it on first use and keeps it cached — nothing to clone, no npm account. Any other MCP client takes
+the same command:
 
 ```json
-{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "refigma-mcp"] } } }
+{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz"] } } }
 ```
 
-`npx` downloads the package on first use and keeps it cached; `npx -y refigma-mcp@latest` picks up new releases.
-For a global install instead: `npm install -g refigma-mcp`, then use `refigma-mcp` as the command.
+**Update:** replace the version in the URL with the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
+(`claude mcp remove refigma-mcp -s user`, then add again). For a global install instead: `npm install -g <the .tgz URL>`,
+then use `refigma-mcp` as the command.
 
 Then give the agent a link — right-click a frame in Figma → **Copy link to selection**:
 
@@ -233,7 +236,7 @@ Deleting any of it is safe: it is captured again on the next call.
 ## CLI
 
 ```bash
-npx -p refigma-mcp figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
+npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
 ```
 
 Writes the same outputs as the server (default `~/.figma-local/out/<file>/<node>`).
