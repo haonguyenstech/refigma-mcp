@@ -9,7 +9,7 @@ SVG icons, design tokens and Figma's own PNG, then checks your implementation ag
 ![MCP server](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.15-339933?logo=node.js&logoColor=white)
 ![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
-![macOS](https://img.shields.io/badge/macOS-Microsoft%20Edge-0078D7?logo=microsoftedge&logoColor=white)
+![macOS | Windows](https://img.shields.io/badge/macOS%20%7C%20Windows-Microsoft%20Edge-0078D7?logo=microsoftedge&logoColor=white)
 ![Fidelity](https://img.shields.io/badge/pixel%20match-99.07%E2%80%9399.98%25-success)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -38,10 +38,11 @@ SVG icons, design tokens and Figma's own PNG, then checks your implementation ag
 
 ## Quick start
 
-**Requirements:** macOS, Microsoft Edge signed in to figma.com, Node ≥ 22.15, Python 3 with `cryptography`, `curl`.
+**Requirements:** macOS or Windows 10/11, Microsoft Edge, Node ≥ 22.15, Python 3, `curl` (built into both).
+On macOS, Edge signed in to figma.com and Python's `cryptography` (to read that session).
 
 ```bash
-claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
 ```
 
 The package is the `.tgz` attached to each [GitHub release](https://github.com/haonguyenstech/refigma-mcp/releases):
@@ -49,7 +50,7 @@ The package is the `.tgz` attached to each [GitHub release](https://github.com/h
 the same command:
 
 ```json
-{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz"] } } }
+{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz"] } } }
 ```
 
 For a global install instead: `npm install -g <the .tgz URL>`, then use `refigma-mcp` as the command.
@@ -58,8 +59,13 @@ Then give the agent a link — right-click a frame in Figma → **Copy link to s
 
 > Implement this design: https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706
 
-On the first capture the server copies your figma.com session from Edge. macOS shows a Keychain prompt for
-**Microsoft Edge Safe Storage**: click **Allow**. If captures later report `NOT_LOGGED_IN`, run `figma_relogin`.
+**macOS:** on the first capture the server copies your figma.com session from Edge. macOS shows a Keychain prompt
+for **Microsoft Edge Safe Storage**: click **Allow**. If captures later report `NOT_LOGGED_IN`, run `figma_relogin`.
+
+**Windows:** Edge's cookies there are app-bound encrypted and locked while Edge runs, so they cannot be copied.
+The first capture reports `NOT_LOGGED_IN` and the agent calls `figma_relogin`, which opens an Edge window on
+refigma's own profile at figma.com/login. Sign in there once (within 5 minutes); the profile keeps the session and
+captures run headless from then on. Python from python.org or the Microsoft Store both work (`python` or `py -3`).
 
 ## Updating
 
@@ -68,7 +74,7 @@ Each release has its own URL, so an install stays on its version until you switc
 **Which version do I run?** The version is in the URL:
 
 ```bash
-claude mcp get refigma-mcp      # Args: -y https://github.com/…/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz
+claude mcp get refigma-mcp      # Args: -y https://github.com/…/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
 ```
 
 **Update** — take the URL of the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
@@ -159,7 +165,7 @@ captures again instead of using the cache. Every answer states where the data ca
 
 | Tool | Does |
 | --- | --- |
-| `figma_relogin()` | Copies the figma.com session from your real Edge profile again (Keychain prompt) and checks it. |
+| `figma_relogin()` | macOS: copies the figma.com session from your real Edge profile again (Keychain prompt) and checks it. Windows: opens an Edge window to sign in to figma.com once. |
 | `figma_status()` | The headless browser, recorded documents, and cached captures with their age. |
 
 ## Fidelity
@@ -239,7 +245,9 @@ A recorded document is only used when every image of the node has a URL; otherwi
 | `REFIGMA_PORT` | `9334` | CDP port of the headless capture browser. |
 | `REFIGMA_CDP` | — | Capture in another browser, e.g. `9222` to watch it in a visible debug Edge. |
 | `REFIGMA_BROWSER` | Microsoft Edge | Browser executable for capture and rendering. |
-| `REFIGMA_EDGE_PROFILE` | `~/Library/Application Support/Microsoft Edge/Default` | Profile the figma.com session is copied from. |
+| `REFIGMA_EDGE_PROFILE` | `~/Library/Application Support/Microsoft Edge/Default` | macOS: profile the figma.com session is copied from. |
+| `REFIGMA_PYTHON` | `python3`; Windows: `python`, then `py -3` | Python 3 interpreter. |
+| `REFIGMA_LOGIN_TIMEOUT` | `300` | Windows: seconds `figma_relogin` waits for the sign-in. |
 | `FIGMA_API_KEY` / `FIGMA_ACCESS_TOKEN` | — | Fallback for images whose URL was never seen (REST image-fills, Tier 2 quota; cached per file for 12h). |
 | `REFIGMA_TRACE=1` | — | Timing trace of a capture on stderr. |
 
@@ -256,7 +264,7 @@ Deleting any of it is safe: it is captured again on the next call.
 ## CLI
 
 ```bash
-npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.4.0/refigma-mcp-0.4.0.tgz figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
+npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
 ```
 
 Writes the same outputs as the server (default `~/.figma-local/out/<file>/<node>`).

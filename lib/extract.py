@@ -1164,7 +1164,7 @@ for hsh in sorted(IMAGES):
 
 # curl --parallel: one process, connections reused; Python's urllib pays ~1-6s of TLS setup per image here
 if todo:
-    cfg = ''.join(f'url = "{urls[h]}"\noutput = "{d}"\n' for h, d in todo)
+    cfg = ''.join(f'url = "{urls[h]}"\noutput = "{d.replace(chr(92), "/")}"\n' for h, d in todo)   # curl's config treats a backslash as an escape
     subprocess.run(['curl', '-sSfL', '--parallel', '--parallel-max', '8', '--retry', '2', '--max-time', '60', '-K', '-'], input=cfg, text=True, capture_output=True)
     for hsh, dst in todo:
         if os.path.exists(dst):

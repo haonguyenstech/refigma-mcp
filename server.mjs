@@ -12,13 +12,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
+import { IS_WIN, pythonCmd, PYTHON_ENV } from './lib/env.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const LIB = f => path.join(ROOT, 'lib', f);
-const READER = path.join(ROOT, 'bin', 'figma-read');
+const NODE = process.execPath;   // the node running this server: Desktop apps start it with a bare PATH
 const CACHE = path.join(os.homedir(), '.figma-local', 'out');
 // A bigger young generation roughly halves decoding time of a page snapshot (150k nodes) — GC dominated otherwise.
-const ENV = { ...process.env, PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+const ENV = { ...process.env, ...PYTHON_ENV,
+  PATH: IS_WIN ? process.env.PATH : `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
   NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-semi-space-size=64`.trim(),
   // node data comes from a recorded page document only while it is recent; older ones fall back to a live capture
   REFIGMA_DOC_MAX_AGE: process.env.REFIGMA_DOC_MAX_AGE || '1800' };
@@ -56,7 +58,7 @@ const ago = ms => { const s = Math.round((Date.now() - ms) / 1000);
 const sourceNote = r => r.cached ? `cached, captured ${ago(capturedAt(r.dir))} ago — pass refresh=true if the design changed since` : `fresh, ${r.source}`;
 
 const run = (cmd, args, timeout = 240_000) => new Promise((resolve, reject) =>
-  execFile(cmd, args, { timeout, env: ENV, maxBuffer: 64 << 20 }, (err, stdout, stderr) =>
+  execFile(cmd, args, { timeout, env: ENV, maxBuffer: 64 << 20, windowsHide: true }, (err, stdout, stderr) =>
     err ? reject(new Error((stderr || stdout || err.message).trim())) : resolve(stdout)));
 
 // One debug browser: every capture/read goes through one queue so nothing reads a half-written capture.
@@ -102,7 +104,8 @@ const stamp = dir => { const f = path.join(dir, 'extract.json');
 const currentExtract = dir => { try { return JSON.parse(fs.readFileSync(path.join(dir, 'extract.json'), 'utf8')).extractor === EXTRACTOR; } catch { return false; } };
 
 async function extractFromMsg(t) {
-  fs.writeFileSync(path.join(t.dir, 'extract.json'), await run('python3', [LIB('extract.py'), msgPath(t.dir), t.node, t.dir]));
+  const [py, ...pyArgs] = pythonCmd();
+  fs.writeFileSync(path.join(t.dir, 'extract.json'), await run(py, [...pyArgs, LIB('extract.py'), msgPath(t.dir), t.node, t.dir]));
   stamp(t.dir);
   packMsg(t.dir);
 }
@@ -114,7 +117,7 @@ async function extractFromMsg(t) {
 // REFIGMA_PROTO=1 adds the prototype viewer between them (just the frame, ~10-25s; experimental: images the browser
 // already cached are not seen, and those nodes fall back to 2). REFIGMA_SOURCE=clipboard always uses 2.
 const fromDoc = async (t, args) => {
-  await run('node', [LIB('doc.mjs'), ...args]);
+  await run(NODE, [LIB('doc.mjs'), ...args]);
   await extractFromMsg(t);
   const missing = JSON.parse(read(t, 'extract.json')).images_missing || [];
   if (missing.length) throw new Error(`images not resolved: ${missing.join(', ')}`);
@@ -137,14 +140,14 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
       try {
         const pdir = path.join(t.fdir, '_proto', nodeDir(t.node));
         fs.rmSync(pdir, { recursive: true, force: true });
-        await run('node', [LIB('capture.mjs'), t.protoUrl, pdir], 90_000);
+        await run(NODE, [LIB('capture.mjs'), t.protoUrl, pdir], 90_000);
         await fromDoc(t, ['extract-dir', pdir, t.node, msg, t.file]);
         return { ...t, cached: false, source: 'prototype' };
       } catch (e) { if (/NOT_LOGGED_IN/.test(e.message)) throw e; }
     }
     for (const f of MSG_FILES) fs.rmSync(path.join(t.dir, f), { force: true });
   }
-  await run('bash', [READER, t.nodeUrl, t.dir]);
+  await run(NODE, [LIB('read.mjs'), t.nodeUrl, t.dir]);
   stamp(t.dir);
   packMsg(t.dir);
   return { ...t, cached: false, source: 'clipboard' };
@@ -153,8 +156,8 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
 const ensureDoc = (url, refresh) => serial(async () => {
   const t = parseUrl(url);
   if (refresh || !hasDoc(t.fdir)) {
-    await run('node', [LIB('capture.mjs'), t.nodeUrl, path.join(t.fdir, '_doc', '_new')]);
-    await run('node', [LIB('doc.mjs'), 'ingest', t.fdir]);
+    await run(NODE, [LIB('capture.mjs'), t.nodeUrl, path.join(t.fdir, '_doc', '_new')]);
+    await run(NODE, [LIB('doc.mjs'), 'ingest', t.fdir]);
   }
   return t;
 });
@@ -183,8 +186,8 @@ server.registerTool('figma_get_metadata', {
     let t = await ensureDoc(url, refresh);
     // the link's node-id is the default root; pages are listed unless a node_id was asked for explicitly
     const node = node_id ? normNode(node_id) : t.node;
-    const pages = node_id ? '' : await run('node', [LIB('doc.mjs'), 'pages', t.fdir]);
-    const outlineOf = () => run('node', [LIB('doc.mjs'), 'outline', t.fdir, node || '', String(depth || (node ? 3 : 2))]);
+    const pages = node_id ? '' : await run(NODE, [LIB('doc.mjs'), 'pages', t.fdir]);
+    const outlineOf = () => run(NODE, [LIB('doc.mjs'), 'outline', t.fdir, node || '', String(depth || (node ? 3 : 2))]);
     let outline;
     try { outline = await outlineOf(); }
     catch (e) {   // the node's page was never recorded: open the node (Figma then loads its page) and record it
@@ -205,7 +208,7 @@ server.registerTool('figma_search', {
 }, async ({ url, query, limit, refresh }) => {
   try {
     const t = await ensureDoc(url, refresh);
-    return text((await run('node', [LIB('doc.mjs'), 'search', t.fdir, query, String(limit || 50)])).trim() || `no layer named like "${query}" (this searches layer names, not text content)`);
+    return text((await run(NODE, [LIB('doc.mjs'), 'search', t.fdir, query, String(limit || 50)])).trim() || `no layer named like "${query}" (this searches layer names, not text content)`);
   } catch (e) { return fail(e); }
 });
 
@@ -235,7 +238,7 @@ server.registerTool('figma_get_nodes', {
       const t = parseUrl(url);
       const todo = ids.filter(id => !errors[id]).filter(id => { const d = parseUrl(url, id).dir; return Date.now() - capturedAt(d) >= CACHE_MAX_AGE || (!(has(d, 'tree.txt') && currentExtract(d)) && !msgPath(d)); });
       if (!todo.length || !hasDoc(t.fdir)) return;
-      const res = JSON.parse(await run('node', [LIB('doc.mjs'), 'extract-many', t.fdir, t.file, ...todo.map(id => `${id}=${path.join(parseUrl(url, id).dir, 'msg.json')}`)]));
+      const res = JSON.parse(await run(NODE, [LIB('doc.mjs'), 'extract-many', t.fdir, t.file, ...todo.map(id => `${id}=${path.join(parseUrl(url, id).dir, 'msg.json')}`)]));
       const ok = todo.filter(id => !res[id]?.error);
       await Promise.all(ok.map(async id => {
         const r = parseUrl(url, id);
@@ -312,7 +315,7 @@ server.registerTool('figma_export', {
     const id = normNode(node_id) || r.node;
     if (!fs.readFileSync(path.join(r.dir, 'index.html'), 'utf8').includes(`data-id="${id}"`)) r = await capture(url, false, { node: id });
     const out = dest || path.join(r.dir, 'exports', `${nodeDir(id)}@${scale}x.${format}`);
-    const res = JSON.parse(await run('node', [LIB('export.mjs'), r.dir, id === r.node ? 'root' : id, format, String(scale), out], 180_000));
+    const res = JSON.parse(await run(NODE, [LIB('export.mjs'), r.dir, id === r.node ? 'root' : id, format, String(scale), out], 180_000));
     const content = [{ type: 'text', text: `${res.out} (${res.width}x${res.height}, ${format} @${scale}x)` }];
     if (format === 'png' && inlinable(res.out)) content.push({ type: 'image', data: fs.readFileSync(res.out).toString('base64'), mimeType: 'image/png' });
     return { content };
@@ -383,11 +386,11 @@ server.registerTool('figma_compare', {
     if (settle_ms !== undefined) env.SETTLE_MS = String(settle_ms);
     if (target === 'react') {
       file = path.join(r.dir, 'react.html');
-      await run('node', [LIB('render-tsx.mjs'), path.join(r.dir, componentFile(r)), file]);
+      await run(NODE, [LIB('render-tsx.mjs'), path.join(r.dir, componentFile(r)), file]);
       env.SETTLE_MS ||= '2500';   // Tailwind Play CDN compiles classes after load
     }
     const out = path.join(r.dir, 'compare', target ? (target === 'react' ? 'react' : 'target') : 'generated');
-    const res = await new Promise((resolve, reject) => execFile('node', [LIB('compare.mjs'), file, png, String(w), String(h), out],
+    const res = await new Promise((resolve, reject) => execFile(NODE, [LIB('compare.mjs'), file, png, String(w), String(h), out],
       { timeout: 300_000, env, maxBuffer: 64 << 20 }, (err, stdout, stderr) => err ? reject(new Error((stderr || err.message).trim())) : resolve(JSON.parse(stdout))));
     const regions = res.worstRegions.map(c => `  x=${c.x} y=${c.y} ${c.w}x${c.h}: ${c.pct}% differs`).join('\n');
     return { content: [
@@ -399,10 +402,12 @@ server.registerTool('figma_compare', {
 
 server.registerTool('figma_relogin', {
   title: 'Refresh the figma.com session',
-  description: "Copies the figma.com cookies from the user's real Microsoft Edge profile into refigma's headless browser and verifies the session. macOS may show a Keychain prompt (\"Microsoft Edge Safe Storage\") that the user must Allow. Use when a capture reports NOT_LOGGED_IN / editor did not load.",
+  description: IS_WIN
+    ? "Opens a Microsoft Edge window at figma.com/login on refigma's own browser profile and waits (up to 5 minutes) for the user to sign in; the profile then keeps the session. Tell the user to sign in in that window before calling. Use on the first use and whenever a capture reports NOT_LOGGED_IN."
+    : "Copies the figma.com cookies from the user's real Microsoft Edge profile into refigma's headless browser and verifies the session. macOS may show a Keychain prompt (\"Microsoft Edge Safe Storage\") that the user must Allow. Use when a capture reports NOT_LOGGED_IN / editor did not load.",
   inputSchema: {},
 }, async () => {
-  try { return text(await run('node', [LIB('browser.mjs'), 'relogin'], 120_000)); } catch (e) { return fail(e); }
+  try { return text(await run(NODE, [LIB('browser.mjs'), 'relogin'], IS_WIN ? 330_000 : 120_000)); } catch (e) { return fail(e); }
 });
 
 server.registerTool('figma_status', {

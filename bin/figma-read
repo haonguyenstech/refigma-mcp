@@ -1,28 +1,3 @@
-#!/usr/bin/env bash
-# figma-read <figma design URL with node-id> [outdir]
-# Opens the link in refigma's headless Edge (no window; FigmaAgent blocked so Figma Desktop never opens),
-# records the page document, copies the node, decodes Figma's clipboard binary locally and writes
-# tree.txt, index.html, <Component>.tsx, assets/, tokens.json (+ frame.png). No REST API, no quota.
-set -euo pipefail
-export NODE_OPTIONS="${NODE_OPTIONS:-} --max-semi-space-size=64"
-URL="$1"; D="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-NODE=$(python3 -c "import sys,urllib.parse as u;q=u.parse_qs(u.urlparse(sys.argv[1]).query);print(q['node-id'][0].replace('-',':'))" "$URL")
-FILE=$(python3 -c "import sys,re;m=re.search(r'/(?:design|file|proto)/([A-Za-z0-9]+)(?:/branch/([A-Za-z0-9]+))?',sys.argv[1]);print(m.group(2) or m.group(1))" "$URL")
-FDIR="$HOME/.figma-local/out/$FILE"
-OUT="${2:-$FDIR/${NODE//:/-}}"; mkdir -p "$OUT"
-rm -rf "$FDIR/_doc/_new"
-node "$D/lib/capture.mjs" "$URL" "$FDIR/_doc/_new" "$OUT" &
-CAP=$!
-# The page document is saved (meta.json last) ~10s before the copy can run, while Figma is still busy loading it:
-# ingest it (decodes ~150k nodes) in that window instead of afterwards.
-while [ ! -f "$FDIR/_doc/_new/meta.json" ] && kill -0 "$CAP" 2>/dev/null; do sleep 0.2; done
-INGEST=
-if [ -f "$FDIR/_doc/_new/meta.json" ]; then
-  ( node "$D/lib/doc.mjs" ingest "$FDIR" >/dev/null || echo "warning: document ingest failed" >&2 ) &
-  INGEST=$!
-fi
-wait "$CAP"
-(cd "$D" && node lib/decode.mjs "$OUT/clip.html" "$OUT/msg.json" >/dev/null)
-python3 "$D/lib/extract.py" "$OUT/msg.json" "$NODE" "$OUT" > "$OUT/extract.json"
-[ -n "$INGEST" ] && wait "$INGEST"
-echo "OK → $OUT  $(cat "$OUT/extract.json")"
+#!/usr/bin/env node
+// figma-read <figma design URL with node-id> [outdir] — see lib/read.mjs
+import '../lib/read.mjs';
