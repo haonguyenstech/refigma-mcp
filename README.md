@@ -1,3 +1,7 @@
+<div align="center">
+
+<img src=".github/assets/icon.png" width="112" alt="refigma-mcp icon" />
+
 # refigma-mcp
 
 **Read Figma frames from an AI agent without the REST API, plugins, or a paid seat.**
@@ -5,48 +9,76 @@
 An [MCP](https://modelcontextprotocol.io) server that turns a Figma link into a layout tree, pixel-faithful HTML / React + Tailwind,
 SVG icons, design tokens and Figma's own PNG, then checks your implementation against that PNG pixel by pixel.
 
-[![Release](https://img.shields.io/github/v/release/haonguyenstech/refigma-mcp?color=cb3837&logo=github)](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
-![MCP server](https://img.shields.io/badge/MCP-stdio%20server-6E56CF)
-![Node](https://img.shields.io/badge/node-%E2%89%A522.15-339933?logo=node.js&logoColor=white)
-![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
-![macOS | Windows](https://img.shields.io/badge/macOS%20%7C%20Windows-Microsoft%20Edge-0078D7?logo=microsoftedge&logoColor=white)
-![Fidelity](https://img.shields.io/badge/pixel%20match-99.07%E2%80%9399.98%25-success)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+<p>
+  <a href="https://github.com/haonguyenstech/refigma-mcp/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/haonguyenstech/refigma-mcp?color=6E56CF&logo=github" /></a>
+  <img alt="MCP server" src="https://img.shields.io/badge/MCP-stdio%20server-6E56CF" />
+  <img alt="Node ≥22.15" src="https://img.shields.io/badge/node-%E2%89%A522.15-339933?logo=node.js&logoColor=white" />
+  <img alt="Python 3" src="https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white" />
+  <img alt="macOS | Windows" src="https://img.shields.io/badge/macOS%20%7C%20Windows-Microsoft%20Edge-0078D7?logo=microsoftedge&logoColor=white" />
+  <img alt="Pixel match" src="https://img.shields.io/badge/pixel%20match-99.07%E2%80%9399.98%25-success" />
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-6E7781" /></a>
+</p>
 
-|  | Figma REST API | Figma plugin | **refigma-mcp** |
+<a href="#features">Features</a> ·
+<a href="#getting-started">Getting started</a> ·
+<a href="#guide">Guide</a> ·
+<a href="#tools">Tools</a> ·
+<a href="#how-it-works">How it works</a> ·
+<a href="#configuration">Configuration</a> ·
+<a href="#limitations">Limitations</a>
+
+<br /><br />
+
+<img src=".github/assets/hero.png" width="860" alt="A Figma frame on the left, its layout tree from refigma-mcp on the right, and the files it generates" />
+
+<sub>Example: “Send – fee” from the <a href="https://bitcoin.design">Bitcoin Design</a> UI Kit (CC BY 4.0).</sub>
+
+</div>
+
+---
+
+## Features
+
+### 🔓 Works on a View seat
+| | Figma REST API | Figma plugin | **refigma-mcp** |
 | --- | --- | --- | --- |
 | View / Collab seat | ~20 reads / month | can't run | **no quota** |
 | Needs | a token | an Edit seat | a figma.com login in Edge |
 | Code out of the box | no | depends on the plugin | **HTML/CSS, React + Tailwind, SVG** |
 | Verify an implementation | no | no | **pixel diff vs Figma's PNG** |
 
+### 🌳 A layout tree an agent can read
+Auto layout, sizes, fills with token names, strokes, radius, shadows, typography, text, style names, prototype interactions, hover variants and Dev Mode annotations, one line per layer. Instances are expanded the way Figma does it.
+
+### 🧱 Code, icons and tokens
+Deterministic HTML/CSS or a React component with Tailwind arbitrary values (incl. `:hover` from prototype variants), SVG icons named after their components, the original images, and every variable and style in use.
+
+### 🎯 Checks your implementation
+`figma_compare` renders your running app, an HTML file or the generated React in an sRGB headless Edge and diffs it with Figma's own PNG: match %, the worst regions and a diff image. Generated HTML scores **99.07–99.98%** on 12 production frames, see [Fidelity](#fidelity).
+
+### ⚡ Fast after the first call
+The first node of a page takes ~25–35s (mostly Figma loading the page). Every other node on that page then comes from the recorded document in ~3–5s, without a browser. See [Speed](#speed).
+
+### 🛡️ Quiet and safe
+A private headless Edge, no window, no Figma Desktop popping up; several agent sessions at once; design content treated as untrusted input. See [Reliability and safety](#reliability-and-safety).
+
 ---
 
-## Contents
+## Getting started
 
-- [Quick start](#quick-start)
-- [Updating](#updating)
-- [How it works](#how-it-works)
-- [Tools](#tools)
-- [Fidelity](#fidelity)
-- [Speed](#speed)
-- [Reliability and safety](#reliability-and-safety)
-- [Configuration](#configuration)
-- [CLI](#cli)
-- [Development](#development)
-- [Limitations](#limitations)
+### Requirements
+- **macOS or Windows 10/11** with **Microsoft Edge**
+- **Node ≥ 22.15**, **Python 3**, `curl` (built into both)
+- On macOS: Edge signed in to figma.com, and Python's `cryptography` (to read that session)
 
-## Quick start
-
-**Requirements:** macOS or Windows 10/11, Microsoft Edge, Node ≥ 22.15, Python 3, `curl` (built into both).
-On macOS, Edge signed in to figma.com and Python's `cryptography` (to read that session).
+### Install
 
 ```bash
 claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
 ```
 
 The package is the `.tgz` attached to each [GitHub release](https://github.com/haonguyenstech/refigma-mcp/releases):
-`npx` downloads it on first use and keeps it cached — nothing to clone, no npm account. Any other MCP client takes
+`npx` downloads it on first use and keeps it cached. Nothing to clone, no npm account. Any other MCP client takes
 the same command:
 
 ```json
@@ -54,10 +86,9 @@ the same command:
 ```
 
 For a global install instead: `npm install -g <the .tgz URL>`, then use `refigma-mcp` as the command.
+Using Claude Desktop through [ccgw](https://github.com/haonguyenstech/ccgw)? `ccgw connector add refigma` writes the entry for you.
 
-Then give the agent a link — right-click a frame in Figma → **Copy link to selection**:
-
-> Implement this design: https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706
+### Sign in to figma.com once
 
 **macOS:** on the first capture the server copies your figma.com session from Edge. macOS shows a Keychain prompt
 for **Microsoft Edge Safe Storage**: click **Allow**. If captures later report `NOT_LOGGED_IN`, run `figma_relogin`.
@@ -67,55 +98,52 @@ The first capture reports `NOT_LOGGED_IN` and the agent calls `figma_relogin`, w
 refigma's own profile at figma.com/login. Sign in there once (within 5 minutes); the profile keeps the session and
 captures run headless from then on. Python from python.org or the Microsoft Store both work (`python` or `py -3`).
 
-## Updating
+---
 
-Each release has its own URL, so an install stays on its version until you switch it — nothing changes under you.
+## Guide
 
-**Which version do I run?** The version is in the URL:
+### 1. Copy a link to a frame
+
+In Figma, right-click a frame → **Copy link to selection**. The link carries the `node-id` of that frame.
+
+### 2. Ask the agent
+
+> Implement this design: https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706
+
+A typical agent run calls `figma_get_node` for the layout tree, `figma_get_assets` for icons and images,
+`figma_get_code` as a starting point, and finally `figma_compare` against your dev server to check the result.
+
+> 📌 Every answer states where the data came from (cache, recorded document or live capture) and how old it is. Pass `refresh: true` to capture again.
+
+### 3. Or run it yourself with the CLI
+
+`figma-read` writes the same outputs as the server:
 
 ```bash
-claude mcp get refigma-mcp      # Args: -y https://github.com/…/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
+npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz figma-read "<figma link>" [out dir]
 ```
 
-**Update** — take the URL of the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
-(its release notes have the full command) and add the server again:
+<p align="center"><img src=".github/assets/figma-read.png" width="860" alt="figma-read on a Figma link: OK, 85 nodes, 9 icons, component SendFee.tsx"></p>
 
-```bash
-claude mcp remove refigma-mcp -s user
-claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/vX.Y.Z/refigma-mcp-X.Y.Z.tgz
-```
+One folder per node, default `~/.figma-local/out/<file>/<node>`:
 
-Then restart Claude Code, or run `/mcp` → `refigma-mcp` → **Reconnect** in an open session. Cached captures are
-re-generated automatically when a release changes the extractor; to roll back, add the older release's URL.
+<p align="center"><img src=".github/assets/outputs.png" width="760" alt="The output folder: tree.txt, index.html, SendFee.tsx, tokens.json, frame.png, assets/icons"></p>
 
-## How it works
+| File | What |
+| --- | --- |
+| `tree.txt` | the layout tree, the same text `figma_get_node` returns |
+| `index.html` | HTML/CSS that renders the frame |
+| `<Component>.tsx` | React + Tailwind version of the same |
+| `assets/icons/*.svg`, `assets/images/` | icons from vector geometry, original images |
+| `tokens.json` | variables and styles in use |
+| `frame.png` | Figma's own 1x PNG, the ground truth for `figma_compare` |
+| `msg.json(.gz)`, `model.json` | the decoded copy data and normalized model, for re-generating |
 
-```mermaid
-flowchart LR
-    A[Figma link] --> B{fresh cache?}
-    B -- yes --> OUT
-    B -- no --> C{page recorded in<br/>the last 30 min?}
-    C -- yes --> D[page document<br/>no browser, ~3-5s]
-    C -- no --> E[live capture<br/>headless Edge, ~25-35s]
-    E --> F[Figma's copy handler<br/>fig-kiwi + PNG]
-    E --> G[multiplayer socket<br/>whole page, ~150k nodes]
-    G -. recorded for next time .-> D
-    F --> X[extract.py]
-    D --> X
-    X --> OUT[tree.txt · index.html · Component.tsx<br/>assets/ · tokens.json · frame.png]
-```
+The tree is what the agent reads first:
 
-A private **headless** Edge (no window, no Figma Desktop, CDP on `:9334`) opens the link in its own tab and:
+<p align="center"><img src=".github/assets/tree.png" width="860" alt="tree.txt: frames with auto layout, instances with their variants, text with font and style names"></p>
 
-- blocks FigmaAgent (`127.0.0.1:44950`), so Figma Desktop never pops up, and closes the
-  *"Need to use the desktop app or installed fonts?"* dialog that would steal focus from Copy-as-PNG;
-- uses a normal Edge user agent (Figma's CDN rejects `HeadlessChrome`) and no automation flag;
-- records the multiplayer WebSocket: a `fig-wire` schema frame plus `NODE_CHANGES` with the whole loaded page,
-  including components, variables and vector blobs;
-- triggers Figma's own copy handler (`execCommand('copy')` on `input.focus-target`) and Copy-as-PNG for the node.
-
-The clipboard payload and the page document are decoded locally (`kiwi-schema`, zstd / deflate) and turned into a
-normalized model, then into code.
+---
 
 ## Tools
 
@@ -168,6 +196,39 @@ captures again instead of using the cache. Every answer states where the data ca
 | `figma_relogin()` | macOS: copies the figma.com session from your real Edge profile again (Keychain prompt) and checks it. Windows: opens an Edge window to sign in to figma.com once. |
 | `figma_status()` | The headless browser, recorded documents, and cached captures with their age. |
 
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Figma link] --> B{fresh cache?}
+    B -- yes --> OUT
+    B -- no --> C{page recorded in<br/>the last 30 min?}
+    C -- yes --> D[page document<br/>no browser, ~3-5s]
+    C -- no --> E[live capture<br/>headless Edge, ~25-35s]
+    E --> F[Figma's copy handler<br/>fig-kiwi + PNG]
+    E --> G[multiplayer socket<br/>whole page, ~150k nodes]
+    G -. recorded for next time .-> D
+    F --> X[extract.py]
+    D --> X
+    X --> OUT[tree.txt · index.html · Component.tsx<br/>assets/ · tokens.json · frame.png]
+```
+
+A private **headless** Edge (no window, no Figma Desktop, CDP on `:9334`) opens the link in its own tab and:
+
+- blocks FigmaAgent (`127.0.0.1:44950`), so Figma Desktop never pops up, and closes the
+  *"Need to use the desktop app or installed fonts?"* dialog that would steal focus from Copy-as-PNG;
+- uses a normal Edge user agent (Figma's CDN rejects `HeadlessChrome`) and no automation flag;
+- records the multiplayer WebSocket: a `fig-wire` schema frame plus `NODE_CHANGES` with the whole loaded page,
+  including components, variables and vector blobs;
+- triggers Figma's own copy handler (`execCommand('copy')` on `input.focus-target`) and Copy-as-PNG for the node.
+
+The clipboard payload and the page document are decoded locally (`kiwi-schema`, zstd / deflate) and turned into a
+normalized model, then into code.
+
+---
+
 ## Fidelity
 
 Generated HTML compared with Figma's PNG, on 12 frames of two production files:
@@ -207,6 +268,8 @@ text anti-aliasing and font metrics.
 
 </details>
 
+---
+
 ## Speed
 
 Measured on a 154k-node file with a View seat:
@@ -221,6 +284,8 @@ Measured on a 154k-node file with a View seat:
 
 A recorded document is only used when every image of the node has a URL; otherwise the node is captured live.
 
+---
+
 ## Reliability and safety
 
 - **Several sessions at once:** captures are serialized across every refigma process on the machine
@@ -232,6 +297,31 @@ A recorded document is only used when every image of the node has a URL; otherwi
 - **Design content is untrusted:** node ids are validated (they become paths) and links must be figma.com; layer names,
   links and font names are escaped in HTML, CSS and TSX; image downloads are pinned to Figma's hosts; the generated
   component is only transpiled in Node and rendered in the sandboxed browser.
+
+---
+
+## Updating
+
+Each release has its own URL, so an install stays on its version until you switch it — nothing changes under you.
+
+**Which version do I run?** The version is in the URL:
+
+```bash
+claude mcp get refigma-mcp      # Args: -y https://github.com/…/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
+```
+
+**Update** — take the URL of the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
+(its release notes have the full command) and add the server again:
+
+```bash
+claude mcp remove refigma-mcp -s user
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/vX.Y.Z/refigma-mcp-X.Y.Z.tgz
+```
+
+Then restart Claude Code, or run `/mcp` → `refigma-mcp` → **Reconnect** in an open session. Cached captures are
+re-generated automatically when a release changes the extractor; to roll back, add the older release's URL.
+
+---
 
 ## Configuration
 
@@ -261,13 +351,7 @@ _images/         images shared by every node of the file
 
 Deleting any of it is safe: it is captured again on the next call.
 
-## CLI
-
-```bash
-npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz figma-read "https://www.figma.com/design/AbCdEf123/App?node-id=3685-53706" [out dir]
-```
-
-Writes the same outputs as the server (default `~/.figma-local/out/<file>/<node>`).
+---
 
 ## Development
 
@@ -311,6 +395,8 @@ gh release create v0.5.0 refigma-mcp-0.5.0.tgz --title "v0.5.0" --notes "…"
 
 Put the install command with the new URL in the release notes, then update the URLs in this README.
 
+---
+
 ## Limitations
 
 - Relies on Figma's undocumented clipboard and multiplayer formats; a Figma release can break it.
@@ -323,3 +409,12 @@ Put the install command with the new URL in the release notes, then update the U
 - A frame is static: no responsive behaviour; sizes are exact px, with hug / fill recorded in the tree.
 - **Security:** the capture browser's CDP port (`:9334`) has no authentication and holds a signed-in figma.com
   session, so any local process can drive it.
+
+---
+
+## Credits
+
+- [kiwi-schema](https://github.com/evanw/kiwi), [pixelmatch](https://github.com/mapbox/pixelmatch), [esbuild](https://esbuild.github.io), the [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+- Example frame in the screenshots: [Bitcoin Design](https://bitcoin.design) UI Kit, CC BY 4.0
+
+<div align="center"><sub>MIT License · Not affiliated with Figma.</sub></div>
