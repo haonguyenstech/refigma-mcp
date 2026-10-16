@@ -86,6 +86,48 @@ the same command:
 ```
 
 For a global install instead: `npm install -g <the .tgz URL>`, then use `refigma-mcp` as the command.
+
+### Claude Desktop
+
+refigma-mcp runs on your machine (stdio), so it is added through the config file, not
+**Settings → Connectors → Add custom connector** (that dialog only takes a remote HTTPS URL).
+
+1. In Claude Desktop open **Settings → Developer → Edit Config**. This opens `claude_desktop_config.json`:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+2. Add `refigma-mcp` under `mcpServers` (keep any servers already there):
+
+   ```json
+   {
+     "mcpServers": {
+       "refigma-mcp": {
+         "command": "npx",
+         "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz"],
+         "env": { "FIGMA_API_KEY": "figd_… (optional, see Configuration)" }
+       }
+     }
+   }
+   ```
+
+   Drop the `env` block if you have no Figma token; every other variable from [Configuration](#configuration) goes there too.
+3. **Quit** Claude Desktop completely (⌘Q on macOS; on Windows, quit from the tray icon) and open it again.
+   Closing the window is not enough: the config is only read at startup.
+4. In a new chat, open the **+** menu → **Connectors** (or the tools icon): `refigma-mcp` is listed with its
+   `figma_*` tools. Paste a frame link and ask, as in the [Guide](#guide).
+
+**If it does not show up** — Claude Desktop starts the server without your shell's `PATH`, so it may not find
+`npx`, a recent enough Node, or the Python that has `cryptography`:
+
+- Use absolute paths: `"command"` = output of `which npx` (Windows: `where npx`, the `npx.cmd` line), and add
+  `"PATH"` to `env` with the folder of that `node` first, e.g. `"PATH": "/opt/homebrew/bin:/usr/bin:/bin"`.
+  With nvm the folder is `~/.nvm/versions/node/<version>/bin`.
+- Set `"REFIGMA_PYTHON"` in `env` to the full path of your `python3` (Windows: `python.exe`).
+- Read the server log: macOS `~/Library/Logs/Claude/mcp-server-refigma-mcp.log`,
+  Windows `%APPDATA%\Claude\logs\mcp-server-refigma-mcp.log`.
+
+Sign-in works as below: the macOS Keychain prompt and the Windows `figma_relogin` window appear the same way
+under Claude Desktop.
+
 Using Claude Desktop through [ccgw](https://github.com/haonguyenstech/ccgw)? `ccgw connector add refigma` writes the entry for you.
 
 ### Sign in to figma.com once
@@ -320,6 +362,8 @@ claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/r
 
 Then restart Claude Code, or run `/mcp` → `refigma-mcp` → **Reconnect** in an open session. Cached captures are
 re-generated automatically when a release changes the extractor; to roll back, add the older release's URL.
+
+**Claude Desktop:** replace the URL in `args` of `claude_desktop_config.json`, then quit and reopen the app.
 
 ---
 
