@@ -93,7 +93,9 @@ refigma-mcp runs on your machine (stdio), so it is added through the config file
 **Settings → Connectors → Add custom connector** (that dialog only takes a remote HTTPS URL).
 
 <p align="center"><img src=".github/assets/claude-desktop-setup.gif" width="860" alt="Setting up refigma-mcp in Claude Desktop: Settings → Developer → Edit config, add the refigma-mcp entry, quit and reopen, check it shows Running, check Connectors, paste a Figma link and get React code with a 98.7% pixel match"></p>
-<p align="center"><sub>macOS, 63 s · <a href=".github/assets/claude-desktop-setup.mp4">MP4 version</a> · <b>Windows, with voice-over: <a href=".github/assets/claude-desktop-windows-setup.mp4">1:56 MP4</a></b> · re-enactments of the steps below<br>Music in the Windows video: “Inspired” by Kevin MacLeod (<a href="https://incompetech.com">incompetech.com</a>), licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
+<p align="center"><sub>macOS, 63 s · <a href="https://pub-ad81218f6d26484ab3b7b9f714c38911.r2.dev/videos/claude-desktop-setup.mp4">watch the MP4</a> · a re-enactment of the steps below</sub></p>
+
+<p align="center"><b>Windows, with voice-over (1:56)</b><br><a href="https://pub-ad81218f6d26484ab3b7b9f714c38911.r2.dev/videos/claude-desktop-windows-setup.mp4"><img src=".github/assets/claude-desktop-windows-setup.jpg" width="640" alt="Play the Windows setup video: winget install, the cmd /c npx config, quit from the tray, check Running, Connectors, Figma sign-in"></a><br><sub>Music: “Inspired” by Kevin MacLeod (<a href="https://incompetech.com">incompetech.com</a>), licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
 
 1. In Claude Desktop open **Settings → Developer → Edit Config**. This opens `claude_desktop_config.json`:
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`

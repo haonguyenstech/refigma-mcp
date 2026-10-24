@@ -2,3 +2,4 @@ node_modules/
 *.tgz
 .github/video/out/
 .impeccable/
+.github/assets/*.mp4
