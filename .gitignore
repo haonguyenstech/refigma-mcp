@@ -1,2 +1,4 @@
 node_modules/
 *.tgz
+.github/video/out/
+.impeccable/

@@ -1,0 +1,388 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>refigma-mcp · Claude Desktop setup</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=block" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1600px; height: 1000px; overflow: hidden; background: #111; }
+  body { font: 15px/1.45 Inter, system-ui, sans-serif; color: #e9e7e2; -webkit-font-smoothing: antialiased; }
+  #stage { position: absolute; inset: 0; overflow: hidden; }
+  #cam { position: absolute; left: 0; top: 0; width: 1600px; height: 1000px; transform-origin: 0 0; }
+  .abs { position: absolute; }
+  /* desktop */
+  #wall { position: absolute; inset: 0; background: radial-gradient(1200px 800px at 20% 10%, #3b3a5a 0%, transparent 60%),
+          radial-gradient(1000px 900px at 90% 90%, #5a3b33 0%, transparent 55%), #1d1c25; }
+  #menubar { position: absolute; left: 0; top: 0; width: 1600px; height: 28px; background: rgba(30,30,34,.72); backdrop-filter: blur(20px);
+             display: flex; align-items: center; gap: 22px; padding: 0 18px; font-size: 13.5px; font-weight: 500; color: #f2f2f2; }
+  #menubar b { font-weight: 700; }
+  #menubar .right { margin-left: auto; opacity: .85; }
+  #mb-claude { padding: 2px 8px; border-radius: 5px; margin-left: -8px; }
+  #dock { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); height: 66px; padding: 7px 10px; display: flex; gap: 10px;
+          background: rgba(40,40,46,.55); border: 1px solid rgba(255,255,255,.12); border-radius: 20px; backdrop-filter: blur(20px); }
+  .dk { width: 52px; height: 52px; border-radius: 12px; position: relative; display: grid; place-items: center; font-size: 26px; }
+  .dk i { position: absolute; bottom: -6px; left: 50%; width: 4px; height: 4px; margin-left: -2px; border-radius: 2px; background: #ddd; }
+  #dk-claude { background: #d97757; color: #fff; font-size: 34px; }
+  /* windows */
+  .win { position: absolute; border-radius: 12px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08); }
+  .tl { position: absolute; left: 16px; top: 15px; display: flex; gap: 8px; }
+  .tl i { width: 12px; height: 12px; border-radius: 6px; background: #ff5f57; } .tl i:nth-child(2) { background: #febc2e; } .tl i:nth-child(3) { background: #28c840; }
+  #cw { left: 60px; top: 46px; width: 1480px; height: 860px; background: #1f1e1d; }
+  #side { position: absolute; left: 0; top: 0; bottom: 0; width: 270px; background: #1a1918; border-right: 1px solid #2c2b29; padding: 52px 12px 0; }
+  .si { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; color: #d8d6d0; font-size: 14.5px; }
+  .si .ic { width: 18px; text-align: center; opacity: .8; }
+  .sh { font-size: 12.5px; color: #8d8a83; padding: 18px 10px 6px; }
+  .rc { padding: 6px 10px; color: #c9c6bf; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #acct { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 10px; }
+  .av { width: 30px; height: 30px; border-radius: 15px; background: #c96442; display: grid; place-items: center; font-weight: 600; font-size: 13px; color: #fff; }
+  #main { position: absolute; left: 270px; top: 0; right: 0; bottom: 0; }
+  #greet { position: absolute; left: 0; right: 0; top: 250px; text-align: center; font: 400 38px 'Source Serif 4', Georgia, serif; color: #ecebe6; }
+  #greet span { color: #d97757; margin-right: 12px; }
+  #comp { position: absolute; left: 50%; width: 760px; margin-left: -380px; min-height: 116px; background: #2a2927; border: 1px solid #3b3a37; border-radius: 20px; padding: 18px 20px 58px; }
+  #comp .ph { color: #8d8a83; font-size: 16px; white-space: pre-wrap; word-break: break-all; }
+  #comp .tx { color: #ecebe6; font-size: 16px; white-space: pre-wrap; word-break: break-all; }
+  #comp .row { position: absolute; left: 14px; right: 14px; bottom: 12px; display: flex; align-items: center; gap: 10px; }
+  .cb { width: 34px; height: 34px; border-radius: 10px; border: 1px solid #3f3e3a; display: grid; place-items: center; font-size: 20px; color: #cfccc5; }
+  #comp .model { margin-left: auto; color: #cfccc5; font-size: 14px; } #comp .model span { color: #8d8a83; margin-left: 6px; }
+  #send { width: 34px; height: 34px; border-radius: 10px; background: #8c4b36; display: grid; place-items: center; color: #f5e9e4; font-size: 18px; }
+  /* chat */
+  #chat { position: absolute; left: 0; right: 0; top: 0; bottom: 0; }
+  .col { position: absolute; left: 50%; width: 760px; margin-left: -380px; }
+  #ub { right: 0; position: absolute; max-width: 600px; background: #33322f; border-radius: 16px; padding: 12px 16px; font-size: 15.5px; word-break: break-all; }
+  .tool { display: flex; align-items: center; gap: 10px; border: 1px solid #3a3936; border-radius: 12px; padding: 11px 14px; font-size: 14.5px; color: #d6d3cc; background: #242321; }
+  .tool .srv { color: #8d8a83; } .tool .st { margin-left: auto; font-size: 13px; color: #8d8a83; }
+  .spin { width: 14px; height: 14px; border-radius: 7px; border: 2px solid #5a5853; border-top-color: #d97757; }
+  .ok { color: #7cc48b; font-weight: 700; }
+  .ans { font: 400 17.5px/1.6 'Source Serif 4', Georgia, serif; color: #ecebe6; }
+  .ans b { font-weight: 600; }
+  .code { font: 13px/1.55 'JetBrains Mono', monospace; background: #161615; border: 1px solid #33322f; border-radius: 12px; padding: 12px 14px; color: #d4d1ca; white-space: pre; overflow: hidden; }
+  .code .k { color: #d68e72; } .code .s { color: #a5c88a; } .code .c { color: #7d7a73; } .code .t { color: #8fb4e3; }
+  .shot { border-radius: 12px; overflow: hidden; border: 1px solid #3a3936; background: #fff; }
+  .badge { display: inline-block; background: #20402a; color: #8fe0a0; border: 1px solid #2f6b40; border-radius: 999px; padding: 2px 10px; font: 600 13px Inter; }
+  /* settings */
+  #settings { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: #1f1e1d; }
+  #snav { position: absolute; left: 0; top: 0; bottom: 0; width: 270px; background: #1a1918; border-right: 1px solid #2c2b29; padding: 60px 12px; }
+  #snav .t { font: 400 26px 'Source Serif 4', serif; padding: 0 10px 18px; }
+  .sn { padding: 7px 10px; border-radius: 8px; color: #d0cdc6; font-size: 14.5px; }
+  .sn.on { background: #2f2e2b; color: #fff; }
+  #spane { position: absolute; left: 330px; top: 70px; width: 820px; }
+  #spane h2 { font: 600 20px Inter; margin-bottom: 6px; } #spane p { color: #a29f97; font-size: 14.5px; }
+  .empty { margin-top: 26px; border: 1px dashed #43413d; border-radius: 14px; padding: 34px; text-align: center; color: #8d8a83; }
+  .btn { display: inline-block; padding: 9px 16px; border-radius: 9px; background: #ecebe6; color: #1a1918; font-weight: 600; font-size: 14px; }
+  .btn.dark { background: #33322f; color: #ecebe6; border: 1px solid #47453f; }
+  .srv-row { margin-top: 26px; border: 1px solid #3a3936; border-radius: 14px; padding: 16px 18px; display: flex; align-items: center; gap: 14px; }
+  .dot { width: 9px; height: 9px; border-radius: 5px; background: #4cc26a; }
+  /* menus */
+  .menu { position: absolute; background: #2b2a28; border: 1px solid #403e3a; border-radius: 12px; padding: 6px; box-shadow: 0 18px 50px rgba(0,0,0,.5); font-size: 14.5px; }
+  .mi { padding: 7px 12px; border-radius: 7px; display: flex; align-items: center; gap: 10px; color: #e2dfd8; white-space: nowrap; }
+  .mi .r { margin-left: auto; color: #8d8a83; padding-left: 24px; }
+  .mi.hl { background: #3a3936; }
+  .sep { height: 1px; background: #3d3b37; margin: 5px 6px; }
+  .tog { margin-left: auto; width: 34px; height: 20px; border-radius: 10px; background: #2f6fd0; position: relative; }
+  .tog::after { content: ''; position: absolute; right: 2px; top: 2px; width: 16px; height: 16px; border-radius: 8px; background: #fff; }
+  #macmenu { position: absolute; left: 30px; top: 28px; width: 250px; background: #2c2c30; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; padding: 5px; font-size: 13.5px; box-shadow: 0 14px 40px rgba(0,0,0,.5); }
+  #macmenu .mi { padding: 4px 10px; border-radius: 5px; }
+  #macmenu .mi.blue { background: #2f6fd0; color: #fff; } #macmenu .mi.blue .r { color: #dfe8ff; }
+  /* finder */
+  #finder { left: 330px; top: 210px; width: 820px; height: 430px; background: #232326; }
+  #finder .bar { height: 52px; border-bottom: 1px solid #333338; display: flex; align-items: center; padding-left: 92px; font-weight: 600; font-size: 14px; color: #e5e5ea; }
+  #finder .fside { position: absolute; left: 0; top: 52px; bottom: 0; width: 170px; background: #1f1f22; padding: 12px; font-size: 13px; color: #a7a7ad; }
+  #finder .files { position: absolute; left: 170px; top: 52px; right: 0; bottom: 0; padding: 10px 14px; font-size: 13.5px; }
+  .fr { display: flex; gap: 10px; padding: 5px 10px; border-radius: 6px; color: #d9d9de; }
+  .fr.sel { background: #2f6fd0; color: #fff; }
+  /* editor */
+  #editor { left: 200px; top: 120px; width: 1200px; height: 600px; background: #1e1e1f; }
+  #editor .bar { height: 40px; display: flex; align-items: center; justify-content: center; font-size: 13.5px; color: #c9c9ce; border-bottom: 1px solid #2f2f33; background: #2a2a2d; }
+  #ed { position: absolute; left: 0; right: 0; top: 40px; bottom: 0; padding: 22px 28px; font: 16px/1.7 'JetBrains Mono', monospace; color: #d7d7db; white-space: pre; }
+  #ed .k { color: #9cdcfe; } #ed .s { color: #ce9178; } #ed .p { color: #d7d7db; }
+  #ed .new { background: rgba(217,119,87,.13); box-shadow: -4px 0 0 #d97757; }
+  .caret { display: inline-block; width: 2px; height: 20px; background: #e8e8e8; vertical-align: -4px; }
+  /* keychain */
+  #kc { left: 590px; top: 250px; width: 440px; background: #2c2c30; border-radius: 14px; padding: 22px 24px 18px; box-shadow: 0 30px 90px rgba(0,0,0,.65), 0 0 0 1px rgba(255,255,255,.12); font-size: 13.5px; color: #e6e6ea; }
+  #kc .ico { width: 56px; height: 56px; border-radius: 12px; background: linear-gradient(#b8b8be, #8c8c94); display: grid; place-items: center; font-size: 30px; margin-bottom: 12px; }
+  #kc p { margin-bottom: 10px; line-height: 1.4; }
+  #kc .pw { height: 30px; border-radius: 7px; background: #1e1e22; border: 1px solid #4a4a52; padding: 5px 10px; letter-spacing: 3px; margin-bottom: 16px; }
+  #kc .bs { display: flex; gap: 8px; justify-content: flex-end; }
+  #kc .b { padding: 6px 14px; border-radius: 7px; background: #45454c; font-weight: 500; }
+  #kc .b.pri { background: #2f6fd0; }
+  /* overlays */
+  #cursor { position: absolute; left: 0; top: 0; width: 26px; height: 26px; pointer-events: none; z-index: 50; filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
+  .ripple { position: absolute; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 22px; border: 3px solid #ffb37f; z-index: 49; opacity: 0; }
+  .mark { position: absolute; border: 3px solid #ff4d4d; border-radius: 10px; box-shadow: 0 0 0 4px rgba(255,77,77,.18); z-index: 40; opacity: 0; }
+  .mark span { position: absolute; left: -3px; top: -34px; background: #ff4d4d; color: #fff; font: 700 14px Inter; padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
+  .key { position: absolute; z-index: 45; background: rgba(20,20,22,.88); border: 1px solid rgba(255,255,255,.2); color: #fff; font: 600 30px Inter; padding: 10px 22px; border-radius: 14px; opacity: 0; }
+  #cap { position: absolute; left: 50%; bottom: 30px; transform: translateX(-50%); z-index: 60; display: flex; align-items: center; gap: 14px;
+         background: rgba(16,16,18,.92); border: 1px solid rgba(255,255,255,.14); border-radius: 16px; padding: 12px 22px 12px 12px; font: 500 21px Inter; color: #fff;
+         box-shadow: 0 12px 40px rgba(0,0,0,.5); white-space: nowrap; }
+  #cap .n { width: 38px; height: 38px; border-radius: 11px; background: #d97757; display: grid; place-items: center; font-weight: 700; font-size: 19px; }
+  #cap small { display: block; font-size: 14.5px; color: #b9b6ae; font-weight: 400; }
+  .card { position: absolute; inset: 0; z-index: 70; display: grid; place-items: center; text-align: center; background: radial-gradient(900px 600px at 50% 40%, #2b2a3a, #121216); }
+  .card h1 { font: 700 54px Inter; letter-spacing: -1px; } .card h1 span { color: #d97757; }
+  .card p { font-size: 22px; color: #b9b6ae; margin-top: 14px; }
+  .card .chips { margin-top: 30px; display: flex; gap: 12px; justify-content: center; }
+  .card .chips div { border: 1px solid #3d3b45; border-radius: 999px; padding: 8px 16px; font-size: 17px; color: #ddd; background: #1d1c24; }
+  .card code { font: 18px 'JetBrains Mono'; color: #f0c4b2; }
+</style></head>
+<body>
+<div id="stage">
+ <div id="cam">
+  <div id="wall"></div>
+  <div id="menubar"><span style="font-size:16px"></span><span id="mb-claude"><b>Claude</b></span><span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span><span class="right">Sat 24 Oct&nbsp;&nbsp;11:30</span></div>
+
+  <div id="cw" class="win">
+   <div class="tl"><i></i><i></i><i></i></div>
+   <div id="side">
+     <div class="si"><span class="ic">＋</span>New chat</div>
+     <div class="si"><span class="ic">☰</span>Chats</div>
+     <div class="si"><span class="ic">▢</span>Projects</div>
+     <div class="si"><span class="ic">◇</span>Artifacts</div>
+     <div class="sh">Recents</div>
+     <div class="rc">Landing page hero section</div><div class="rc">Sprint planning notes</div><div class="rc">Dashboard copy review</div><div class="rc">Onboarding email draft</div>
+     <div id="acct"><div class="av">H</div><div>Hao Nguyen<div style="font-size:12px;color:#8d8a83">Pro plan</div></div></div>
+   </div>
+   <div id="main">
+     <div id="greet"><span>✳</span>Good morning, Hao</div>
+     <div id="chat">
+       <div class="col" id="c-user" style="top:36px;height:60px"><div id="ub">Turn this Figma frame into React + Tailwind: https://www.figma.com/design/7dkR8zP71qc5MtUFCPi7Hd/Social-Media-Analytics?node-id=2-977</div></div>
+       <div class="col" id="c-tool1" style="top:116px"><div class="tool"><span>⚙</span><span><b style="font-weight:600">figma_get_code</b> <span class="srv">· refigma-mcp</span></span><span class="st" id="t1s"></span></div></div>
+       <div class="col ans" id="c-ans" style="top:172px"></div>
+       <div class="col" id="c-code" style="top:252px"><div class="code"><span class="c">// SocialMediaAnalyticsDashboard.tsx — generated by refigma-mcp from node 2:977</span>
+<span class="k">export default function</span> <span class="t">SocialMediaAnalyticsDashboard</span>() {
+  <span class="k">return</span> (
+    &lt;<span class="t">div</span> className=<span class="s">"relative w-[1440px] h-[990px] bg-[#FAFAFA] overflow-hidden"</span>&gt;
+      &lt;<span class="t">div</span> className=<span class="s">"absolute left-[0px] top-[0px] w-[284px] h-[990px]"</span> data-name=<span class="s">"Menu Sidebar"</span>&gt;
+      …</div></div>
+       <div class="col" id="c-tool2" style="top:408px"><div class="tool"><span>⚙</span><span><b style="font-weight:600">figma_compare</b> <span class="srv">· refigma-mcp</span></span><span class="st" id="t2s"></span></div></div>
+       <div class="col" id="c-res" style="top:462px;display:flex;gap:16px;align-items:flex-start">
+         <div class="shot" style="width:330px"><img src="img/render.png" style="width:100%;display:block"></div>
+         <div class="ans" style="font-size:17px">Rendered and checked against Figma's own PNG:<br><span class="badge">98.7% pixel match</span><br><span style="color:#a29f97;font-size:15.5px">434 layers · 59 SVG icons · 18 images · fonts linked</span></div>
+       </div>
+     </div>
+     <div id="comp"><div class="ph" id="ph">How can I help you today?</div><div class="tx" id="ctx"></div>
+       <div class="row"><div class="cb" id="plus">＋</div><div class="cb" style="font-size:15px">⚲</div><div class="model">Opus 5.5<span>Medium</span></div><div id="send">↑</div></div></div>
+   </div>
+   <div id="settings">
+     <div id="snav"><div class="t">Settings</div>
+       <div class="sn">General</div><div class="sn">Account</div><div class="sn">Privacy</div><div class="sn">Capabilities</div><div class="sn">Connectors</div>
+       <div class="sh">Desktop app</div><div class="sn">General</div><div class="sn">Extensions</div><div class="sn" id="sn-dev">Developer</div></div>
+     <div id="spane">
+       <div id="sp-gen"><h2>Profile</h2><p>Full name, how Claude should address you, and your work.</p>
+         <div class="empty" style="text-align:left;border-style:solid">Hao Nguyen · Software engineer</div></div>
+       <div id="sp-dev" style="position:absolute;left:0;top:0;width:820px"><h2>Local MCP servers</h2><p>Servers that run on this computer, configured in <span style="font-family:JetBrains Mono;color:#e0b6a5">claude_desktop_config.json</span>.</p>
+         <div class="empty" id="dev-empty">No servers added yet<br><br><br><span class="btn" id="editcfg">Edit Config</span></div>
+         <div class="srv-row" id="dev-row"><div class="dot"></div><div><b style="font-weight:600">refigma-mcp</b><div style="color:#8d8a83;font-size:13.5px">running · 9 tools</div></div><span class="btn dark" style="margin-left:auto">Edit Config</span></div></div>
+     </div>
+   </div>
+  </div>
+
+  <div id="finder" class="win">
+    <div class="tl"><i></i><i></i><i></i></div>
+    <div class="bar">‹ ›&nbsp;&nbsp;&nbsp;Claude</div>
+    <div class="fside">Favourites<br><br>⌂ Home<br>▣ Desktop<br>⬇ Downloads<br>▤ Documents</div>
+    <div class="files">
+      <div class="fr">▸ 📁 Cache</div><div class="fr">▸ 📁 logs</div><div class="fr sel" id="cfgfile">&nbsp;&nbsp;&nbsp;📄 claude_desktop_config.json</div><div class="fr">&nbsp;&nbsp;&nbsp;📄 config.json</div>
+      <div style="position:absolute;left:14px;bottom:10px;font-size:12px;color:#8a8a90">~/Library/Application Support/Claude</div>
+    </div>
+  </div>
+
+  <div id="editor" class="win">
+    <div class="tl"><i></i><i></i><i></i></div>
+    <div class="bar" id="edtitle">claude_desktop_config.json</div>
+    <div id="ed"></div>
+  </div>
+
+  <div id="kc" class="abs">
+    <div class="ico">🔑</div>
+    <p><b>security</b> wants to use your confidential information stored in "<b>Microsoft Edge Safe Storage</b>" in your keychain.</p>
+    <p style="color:#b3b3ba">To allow this, enter the "login" keychain password.</p>
+    <div class="pw" id="pw"></div>
+    <div class="bs"><span class="b" id="kc-always">Always Allow</span><span class="b">Deny</span><span class="b pri">Allow</span></div>
+  </div>
+
+  <!-- menus -->
+  <div id="m-acct" class="menu" style="left:72px;top:690px;width:250px">
+    <div class="mi" style="color:#8d8a83;font-size:13px">hao@example.com</div><div class="sep"></div>
+    <div class="mi" id="mi-settings">Settings<span class="r">⌘,</span></div><div class="mi">Language</div><div class="mi">Get help</div><div class="sep"></div><div class="mi">Log out</div>
+  </div>
+  <div id="m-plus" class="menu" style="width:270px">
+    <div class="mi">📎&nbsp; Add files or photos</div><div class="mi">▢&nbsp; Add to project</div><div class="sep"></div>
+    <div class="mi" id="mi-conn">⚙&nbsp; Connectors<span class="r">›</span></div><div class="mi">◎&nbsp; Research</div>
+  </div>
+  <div id="m-conn" class="menu" style="width:300px">
+    <div class="mi" style="color:#8d8a83;font-size:13px">Connectors</div>
+    <div class="mi" id="mi-refigma"><span style="width:22px;height:22px;border-radius:6px;background:#d97757;display:grid;place-items:center;font-size:12px;color:#fff;font-weight:700">R</span>refigma-mcp<span class="tog"></span></div>
+    <div class="mi"><span style="width:22px;height:22px;border-radius:6px;background:#3a3936;display:grid;place-items:center;font-size:12px">⌕</span>Web search<span class="tog" style="background:#4a4945"></span></div>
+    <div class="sep"></div><div class="mi" style="color:#a29f97">Manage connectors</div>
+  </div>
+  <div id="macmenu">
+    <div class="mi">About Claude</div><div class="mi">Check for Updates…</div><div class="sep" style="background:rgba(255,255,255,.12)"></div>
+    <div class="mi">Settings…<span class="r">⌘,</span></div><div class="sep" style="background:rgba(255,255,255,.12)"></div>
+    <div class="mi">Hide Claude<span class="r">⌘H</span></div><div class="mi" id="mi-quit">Quit Claude<span class="r">⌘Q</span></div>
+  </div>
+
+  <div id="dock"><div class="dk" style="background:#2c6ee8">◉</div><div class="dk" style="background:#3a3a40">▦</div><div class="dk" style="background:linear-gradient(#36b0f5,#1773d6)">◐</div><div class="dk" style="background:#1d1d1f;color:#9f9">&gt;_</div><div class="dk" id="dk-claude">✳<i id="dk-dot"></i></div><div class="dk" style="background:#eee;color:#333">✎</div></div>
+
+  <div class="mark" id="mk"><span></span></div>
+  <div class="key" id="key"></div>
+  <div class="ripple" id="rip"></div>
+  <svg id="cursor" viewBox="0 0 24 24"><path d="M3 2 L3 19 L7.6 14.9 L10.6 21.4 L13.6 20 L10.7 13.6 L17 13.4 Z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg>
+ </div>
+ <div id="cap"><div class="n" id="capn">1</div><div><div id="capt"></div><small id="caps"></small></div></div>
+ <div class="card" id="title"><div><h1>refigma-mcp <span>×</span> Claude Desktop</h1><p>Set up in one config file and one restart, then paste a Figma link.</p>
+   <div class="chips"><div>No Figma API token</div><div>Works on View seats</div><div>macOS · Windows</div></div></div></div>
+ <div class="card" id="end"><div><h1>That's it <span>✳</span></h1><p>From v0.6.0, new releases install themselves. Restart Claude Desktop to use one.</p>
+   <div class="chips"><div><code>github.com/haonguyenstech/refigma-mcp</code></div></div></div></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const ease = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+function kf(t, fr) {
+  if (t <= fr[0][0]) return fr[0][1];
+  for (let i = 1; i < fr.length; i++) {
+    const [t1, v1] = fr[i], [t0, v0] = fr[i - 1];
+    if (t <= t1) { const p = ease(clamp((t - t0) / (t1 - t0 || 1))); return Array.isArray(v0) ? v0.map((a, j) => a + (v1[j] - a) * p) : v0 + (v1 - v0) * p; }
+  }
+  return fr.at(-1)[1];
+}
+// opacity of something shown from a to b with short fades
+const vis = (t, a, b, f = .18) => clamp(Math.min((t - a) / f, (b - t) / f));
+const op = (el, o) => { el.style.opacity = o; el.style.visibility = o <= 0 ? 'hidden' : 'visible'; };
+
+// ---- content
+const ED0 = '{\n  "mcpServers": {\n', ED2 = '  }\n}\n';
+const ENTRY = '    "refigma-mcp": {\n      "command": "npx",\n      "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz"]\n    }\n';
+const PROMPT = 'Turn this Figma frame into React + Tailwind: https://www.figma.com/design/7dkR8zP71qc5MtUFCPi7Hd/Social-Media-Analytics?node-id=2-977';
+const ANS = 'Done. I generated <b>SocialMediaAnalyticsDashboard.tsx</b> from the frame (1440 × 990): sidebar, profile card, stats, target rings and the photo gallery, with exact sizes and colors.';
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const hl = s => esc(s).replace(/("[^"]*")(\s*:)/g, '<span class="k">$1</span>$2').replace(/(:\s*|\[|, )("[^"]*")/g, '$1<span class="s">$2</span>');
+
+// ---- positions (measured once, camera at identity)
+const P = (s, dx = 0, dy = 0) => { const r = $(s).getBoundingClientRect(); return [r.left + r.width / 2 + dx, r.top + r.height / 2 + dy]; };
+let T, CUR, CLICKS, CAM, CAPS, MARKS, KEYS;
+function setup() {
+  // place menus next to their triggers
+  const comp = () => $('#comp').getBoundingClientRect();
+  $('#comp').style.top = '330px';
+  const pr = $('#plus').getBoundingClientRect();
+  Object.assign($('#m-plus').style, { left: pr.left + 'px', top: pr.bottom + 8 + 'px' });
+  const cr = $('#mi-conn').getBoundingClientRect();
+  Object.assign($('#m-conn').style, { left: cr.right + 6 + 'px', top: cr.top - 6 + 'px' });
+  const at = {
+    acct: P('#acct'), set: P('#mi-settings'), dev: P('#sn-dev'), edit: P('#editcfg'), file: P('#cfgfile', -120),
+    mbc: P('#mb-claude'), quit: P('#mi-quit'), dock: P('#dk-claude'), plus: P('#plus'), conn: P('#mi-conn'), ref: P('#mi-refigma', 40),
+    comp: P('#comp', -200, -20), send: P('#send'), always: P('#kc-always'),
+  };
+  T = 56;
+  CUR = [[0, [900, 600]], [3.2, [900, 600]], [4.6, at.acct], [5.3, at.acct], [6.1, at.set], [6.6, at.set], [7.6, at.dev], [8.1, at.dev], [9.2, at.edit], [9.9, at.edit],
+    [11.0, at.file], [11.8, at.file], [12.6, [1380, 700]], [21.5, [1380, 700]], [24.2, at.mbc], [24.8, at.mbc], [25.5, at.quit], [26.1, at.quit], [27.1, at.dock], [27.6, at.dock],
+    [29.8, at.plus], [30.3, at.plus], [31.1, at.conn], [31.6, at.conn], [32.3, at.ref], [35.0, at.ref], [35.8, at.comp], [39.3, at.comp], [39.8, at.send], [40.2, at.send],
+    [41.6, [900, 620]], [42.6, at.always], [44.3, at.always], [45.4, [1250, 820]], [56, [1250, 820]]];
+  CLICKS = [5.3, 6.6, 8.1, 9.9, 11.8, 12.05, 24.8, 26.1, 27.6, 30.3, 31.6, 35.95, 40.2, 44.3];
+  // camera: [scale, focus x, focus y]
+  const W = [1, 800, 500];
+  CAM = [[0, W], [3.3, W], [4.6, [1.7, 260, 760]], [6.3, [1.7, 260, 760]], [7.3, [1.45, 560, 420]], [10.2, [1.45, 560, 420]], [10.8, [1.3, 740, 430]], [12.2, [1.3, 740, 430]],
+    [13.0, [1.32, 800, 330]], [19.0, [1.32, 800, 330]], [19.6, [1.55, 900, 330]], [22.6, [1.55, 900, 330]], [23.6, W], [24.0, [1.6, 200, 160]], [26.0, [1.6, 200, 160]], [27.0, W],
+    [29.3, W], [30.0, [1.6, 760, 470]], [35.0, [1.6, 760, 470]], [35.8, [1.35, 820, 400]], [40.6, [1.35, 820, 400]], [41.4, [1.25, 820, 390]], [44.6, [1.25, 820, 390]],
+    [45.4, [1.2, 830, 440]], [50.5, [1.2, 830, 440]], [51.5, [1.35, 900, 600]], [53.6, [1.35, 900, 600]], [54.2, W], [56, W]];
+  CAPS = [[3, 10.6, '1', 'Open Settings → Developer → Edit Config', 'Claude Desktop shows the config file in Finder'],
+    [10.6, 23.4, '2', 'Add refigma-mcp under "mcpServers", then save', 'Copy the entry from the README; keep any servers already there'],
+    [23.4, 29.4, '3', 'Quit Claude Desktop completely (⌘Q), then open it again', 'Closing the window is not enough: the config is read at startup'],
+    [29.4, 35.4, '4', 'Check it: ＋ → Connectors → refigma-mcp is on', 'Settings → Developer also lists it as running'],
+    [35.4, 41.2, '5', 'Paste a link to a Figma frame and ask', 'Right-click a frame in Figma → Copy link to selection'],
+    [41.2, 45.0, '6', 'First time only: allow the Keychain prompt', 'refigma reads your figma.com session from Edge, so no Figma token is needed'],
+    [45.0, 54.0, '7', 'Code comes back, checked pixel by pixel against Figma', 'figma_get_code → TSX / HTML, assets and tokens · figma_compare → match %']];
+  const R = s => { const r = $(s).getBoundingClientRect(); return [r.left - 8, r.top - 8, r.width + 16, r.height + 16]; };
+  MARKS = [[8.5, 10.2, R('#editcfg'), 'Edit Config'], [19.8, 22.6, null, 'the release URL'], [32.4, 35.0, R('#mi-refigma'), '9 figma_* tools']];
+  KEYS = [[22.0, 23.0, '⌘ S', [880, 560]], [25.9, 26.9, '⌘ Q', [520, 300]]];
+}
+
+function render(t) {
+  // camera
+  const [s, fx, fy] = kf(t, CAM);
+  const cx = clamp(fx, 800 / s, 1600 - 800 / s), cy = clamp(fy, 500 / s, 1000 - 500 / s);
+  $('#cam').style.transform = `translate(${800 - cx * s}px, ${500 - cy * s}px) scale(${s})`;
+  // cursor + click ripple
+  const [x, y] = kf(t, CUR);
+  Object.assign($('#cursor').style, { left: x - 4 + 'px', top: y - 3 + 'px' });
+  const c = CLICKS.filter(c => t >= c && t < c + .45).at(-1);
+  if (c !== undefined) { const p = (t - c) / .45; Object.assign($('#rip').style, { left: x + 'px', top: y + 'px', opacity: 1 - p, transform: `scale(${.4 + p})` }); }
+  else $('#rip').style.opacity = 0;
+
+  // Claude window: closed between Quit (26.3) and the dock click (27.8)
+  const winOn = t < 26.3 || t >= 28.0;
+  op($('#cw'), winOn ? (t >= 28.0 ? clamp((t - 28.0) / .35) : 1) : clamp(1 - (t - 26.3) / .25));
+  $('#cw').style.transform = t >= 28 && t < 28.35 ? `scale(${.96 + .04 * (t - 28) / .35})` : t >= 26.3 && t < 26.6 ? `scale(${1 - .04 * (t - 26.3) / .3})` : '';
+  op($('#dk-dot'), winOn || t < 26.6 ? 1 : 0);
+  $('#dk-claude').style.transform = t > 27.6 && t < 28.3 ? `translateY(${-22 * Math.abs(Math.sin((t - 27.6) * Math.PI / .35))}px)` : '';
+
+  // settings page (6.7 → 10.6), then back to chat after the restart
+  op($('#settings'), vis(t, 6.7, 10.6));
+  op($('#sp-gen'), t < 8.2 ? 1 : 0); op($('#sp-dev'), t >= 8.2 ? 1 : 0);
+  $('#sn-dev').classList.toggle('on', t >= 8.2);
+  $('#snav .sn').classList.toggle('on', t < 8.2);
+  op($('#dev-empty'), 1); op($('#dev-row'), 0);
+  op($('#m-acct'), vis(t, 5.4, 6.75, .12));
+  $('#mi-settings').classList.toggle('hl', t > 6.0);
+  op($('#finder'), vis(t, 10.1, 12.5));
+  // editor: types the entry
+  op($('#editor'), vis(t, 12.2, 23.4));
+  const n = Math.round(clamp((t - 13.6) / 5.0) * ENTRY.length);
+  const typed = ENTRY.slice(0, n);
+  const lines = (ED0 + typed).split('\n'); const last = lines.pop();
+  const preN = ED0.split('\n').length - 1;
+  const html = lines.map((l, i) => i >= preN ? `<span class="new">${hl(l)}</span>` : hl(l)).join('\n') + '\n' + (last ? `<span class="new">${hl(last)}</span>` : '') + (t < 22 && Math.floor(t * 2.2) % 2 === 0 ? '<span class="caret"></span>' : '') + (n < ENTRY.length ? '\n' : '') + hl(ED2);
+  $('#ed').innerHTML = html;
+  $('#edtitle').textContent = 'claude_desktop_config.json' + (t > 13.6 && t < 22.1 ? ' — Edited' : '');
+  // mac menu bar menu
+  op($('#macmenu'), vis(t, 24.85, 26.25, .1));
+  $('#mb-claude').style.background = t > 24.85 && t < 26.25 ? 'rgba(255,255,255,.2)' : '';
+  $('#mi-quit').classList.toggle('blue', t > 25.5);
+  // composer + chat
+  const chatOn = t >= 40.3;
+  op($('#greet'), chatOn ? 0 : 1);
+  $('#comp').style.top = chatOn ? '728px' : '330px';
+  const pn = Math.round(clamp((t - 36.0) / 3.0) * PROMPT.length);
+  const typing = t >= 36.0 && !chatOn;
+  $('#ph').style.display = typing && pn ? 'none' : 'block';
+  $('#ctx').style.display = typing && pn ? 'block' : 'none';
+  $('#ctx').innerHTML = esc(PROMPT.slice(0, pn)) + (Math.floor(t * 2.2) % 2 ? '' : '<span class="caret" style="height:18px;background:#d97757"></span>');
+  $('#ph').textContent = chatOn ? 'Reply to Claude…' : 'How can I help you today?';
+  $('#comp').style.minHeight = typing && pn > 60 ? '140px' : '116px';
+  op($('#m-plus'), vis(t, 30.4, 35.2, .12)); $('#mi-conn').classList.toggle('hl', t > 31.1);
+  op($('#m-conn'), vis(t, 31.7, 35.2, .12)); $('#mi-refigma').classList.toggle('hl', t > 32.3);
+  op($('#chat'), chatOn ? 1 : 0);
+  op($('#c-user'), chatOn ? 1 : 0);
+  op($('#c-tool1'), vis(t, 40.8, 99));
+  $('#t1s').innerHTML = t < 45.0 ? '<span style="display:inline-flex;gap:8px;align-items:center"><span class="spin" style="transform:rotate(' + (t * 400) + 'deg)"></span>capturing…</span>' : '<span class="ok">✓</span> 14 s';
+  op($('#kc'), vis(t, 41.9, 44.5, .15));
+  $('#pw').textContent = '•'.repeat(Math.round(clamp((t - 42.7) / 1.0) * 10));
+  // answer streams in
+  const an = Math.round(clamp((t - 45.2) / 2.4) * ANS.length);
+  const cut = ANS.slice(0, an); $('#c-ans').innerHTML = cut.replace(/<[^>]*$/, '');
+  op($('#c-code'), vis(t, 47.6, 99, .3));
+  op($('#c-tool2'), vis(t, 49.0, 99));
+  $('#t2s').innerHTML = t < 50.8 ? '<span class="spin" style="display:inline-block;transform:rotate(' + (t * 400) + 'deg)"></span>' : '<span class="ok">✓</span> 4 s';
+  op($('#c-res'), vis(t, 50.9, 99, .3));
+
+  // red marks
+  const m = MARKS.find(([a, b]) => t >= a && t < b);
+  if (m) {
+    let r = m[2];
+    if (!r) { const sp = [...$('#ed').querySelectorAll('.s')].find(e => e.textContent.includes('github.com')); if (sp) { const b = sp.getBoundingClientRect(), k = kf(t, CAM)[0];
+      const cr = $('#cam').getBoundingClientRect(); r = [(b.left - cr.left) / k - 8, (b.top - cr.top) / k - 6, b.width / k + 16, b.height / k + 12]; } }
+    if (r) { Object.assign($('#mk').style, { left: r[0] + 'px', top: r[1] + 'px', width: r[2] + 'px', height: r[3] + 'px', opacity: vis(t, m[0], m[1]) }); $('#mk span').textContent = m[3]; }
+  } else $('#mk').style.opacity = 0;
+  const k = KEYS.find(([a, b]) => t >= a && t < b);
+  if (k) { Object.assign($('#key').style, { left: k[3][0] + 'px', top: k[3][1] + 'px', opacity: vis(t, k[0], k[1]) }); $('#key').textContent = k[2]; } else $('#key').style.opacity = 0;
+
+  // caption + cards
+  const cp = CAPS.find(([a, b]) => t >= a && t < b);
+  op($('#cap'), cp ? vis(t, cp[0], cp[1], .25) : 0);
+  if (cp) { $('#capn').textContent = cp[2]; $('#capt').textContent = cp[3]; $('#caps').textContent = cp[4]; }
+  op($('#title'), t < 2.6 ? 1 : clamp(1 - (t - 2.6) / .5));
+  op($('#end'), clamp((t - 54.0) / .5));
+  op($('#cursor'), t > 2.8 && t < 54.2 ? 1 : 0);
+}
+window.ready = document.fonts.ready.then(() => { setup(); render(0); });
+</script>
+</body></html>
