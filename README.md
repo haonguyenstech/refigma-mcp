@@ -94,7 +94,7 @@ refigma-mcp runs on your machine (stdio), so it is added through the config file
 
 <p align="center"><sub>macOS version (63 s, no sound): <a href="https://pub-ad81218f6d26484ab3b7b9f714c38911.r2.dev/videos/claude-desktop-setup.mp4">watch the MP4</a> · both videos re-enact the steps below</sub></p>
 
-<p align="center"><b>Windows, with voice-over (1:56)</b><br><a href="https://pub-ad81218f6d26484ab3b7b9f714c38911.r2.dev/videos/claude-desktop-windows-setup.mp4"><img src=".github/assets/claude-desktop-windows-setup.jpg" width="640" alt="Play the Windows setup video: winget install, the cmd /c npx config, quit from the tray, check Running, Connectors, Figma sign-in"></a><br><sub>Music: “Inspired” by Kevin MacLeod (<a href="https://incompetech.com">incompetech.com</a>), licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></sub></p>
+<p align="center"><a href="https://pub-ad81218f6d26484ab3b7b9f714c38911.r2.dev/videos/claude-desktop-windows-setup.mp4"><img src=".github/assets/claude-desktop-windows-setup.jpg" width="100%" alt="Play the Windows setup video: winget install, the cmd /c npx config, quit from the tray, check Running, Connectors, Figma sign-in"></a></p>
 
 1. In Claude Desktop open **Settings → Developer → Edit Config**. This opens `claude_desktop_config.json`:
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
