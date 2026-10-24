@@ -1,6 +1,6 @@
 {
   "name": "refigma-mcp",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "MCP server that reads Figma frames without the REST API, plugins or a paid seat: layout tree, pixel-faithful HTML / React + Tailwind, SVG icons, tokens, and a pixel diff against Figma's own PNG.",
   "keywords": [
     "mcp",

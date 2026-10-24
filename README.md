@@ -74,7 +74,7 @@ A private headless Edge, no window, no Figma Desktop popping up; several agent s
 ### Install
 
 ```bash
-claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz
 ```
 
 The package is the `.tgz` attached to each [GitHub release](https://github.com/haonguyenstech/refigma-mcp/releases):
@@ -82,7 +82,7 @@ The package is the `.tgz` attached to each [GitHub release](https://github.com/h
 the same command:
 
 ```json
-{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz"] } } }
+{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"] } } }
 ```
 
 For a global install instead: `npm install -g <the .tgz URL>`, then use `refigma-mcp` as the command.
@@ -105,7 +105,7 @@ refigma-mcp runs on your machine (stdio), so it is added through the config file
      "mcpServers": {
        "refigma-mcp": {
          "command": "npx",
-         "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz"],
+         "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"],
          "env": { "FIGMA_API_KEY": "figd_… (optional, see Configuration)" }
        }
      }
@@ -120,7 +120,7 @@ refigma-mcp runs on your machine (stdio), so it is added through the config file
    ```json
    "refigma-mcp": {
      "command": "cmd",
-     "args": ["/c", "npx", "-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz"]
+     "args": ["/c", "npx", "-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"]
    }
    ```
 3. **Quit** Claude Desktop completely (⌘Q on macOS; on Windows, quit from the tray icon) and open it again.
@@ -177,7 +177,7 @@ A typical agent run calls `figma_get_node` for the layout tree, `figma_get_asset
 `figma-read` writes the same outputs as the server:
 
 ```bash
-npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz figma-read "<figma link>" [out dir]
+npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz figma-read "<figma link>" [out dir]
 ```
 
 <p align="center"><img src=".github/assets/figma-read.png" width="860" alt="figma-read on a Figma link: OK, 85 nodes, 9 icons, component SendFee.tsx"></p>
@@ -402,7 +402,7 @@ Roll back: set `REFIGMA_AUTO_UPDATE=0` and an older release's URL, or delete the
 
 ```bash
 claude mcp remove refigma-mcp -s user
-claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz
 ```
 
 Cached captures are re-generated automatically when a release changes the extractor.
@@ -429,11 +429,15 @@ tail -1 ~/.figma-local/app/update.log      # "installed 0.7.0 (was 0.6.0); used 
 
 ```powershell
 # Windows
-node (Get-ChildItem "$env:USERPROFILE\.figma-local\app", "$env:LOCALAPPDATA\npm-cache\_npx" -Recurse -Filter update.mjs -ErrorAction SilentlyContinue | Where-Object FullName -like '*lib\update.mjs' | Select-Object -First 1).FullName --force
+# the updater of the newest installed copy (v0.6.0's cannot install on Windows)
+$u = Get-ChildItem "$env:USERPROFILE\.figma-local\app", "$env:LOCALAPPDATA\npm-cache\_npx" -Recurse -Filter update.mjs -ErrorAction SilentlyContinue |
+  Where-Object FullName -like '*lib\update.mjs' |
+  Sort-Object { [version](Get-Content "$($_.Directory.Parent.FullName)\package.json" -Raw | ConvertFrom-Json).version } -Descending | Select-Object -First 1
+node $u.FullName --force
 Get-Content "$env:USERPROFILE\.figma-local\app\update.log" -Tail 1
 ```
 
-No new line in the log means you already run the latest release.
+The last line says `installed …` or `up to date: …`.
 
 **On v0.5.0 or older (or v0.6.0 on Windows) — change the URL once.** Those versions have no working updater, and each release URL is cached by
 `npx`, so they never move on their own:
@@ -444,7 +448,7 @@ No new line in the log means you already run the latest release.
 2. In the `refigma-mcp` entry, set the release URL in `args`; keep `command` and `env` as they are:
 
    ```json
-   "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.1/refigma-mcp-0.6.1.tgz"]
+   "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"]
    ```
 
 3. Quit Claude Desktop completely and open it again, then check with *"run figma_status"*.
