@@ -58,18 +58,23 @@
   .shot { border-radius: 12px; overflow: hidden; border: 1px solid #3a3936; background: #fff; }
   .badge { display: inline-block; background: #20402a; color: #8fe0a0; border: 1px solid #2f6b40; border-radius: 999px; padding: 2px 10px; font: 600 13px Inter; }
   /* settings */
-  #settings { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: #1f1e1d; }
-  #snav { position: absolute; left: 0; top: 0; bottom: 0; width: 270px; background: #1a1918; border-right: 1px solid #2c2b29; padding: 60px 12px; }
-  #snav .t { font: 400 26px 'Source Serif 4', serif; padding: 0 10px 18px; }
-  .sn { padding: 7px 10px; border-radius: 8px; color: #d0cdc6; font-size: 14.5px; }
+  #settings { position: absolute; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,.45); }
+  #smodal { position: absolute; left: 150px; top: 42px; right: 22px; bottom: 0; background: #1f1e1d; border: 1px solid #33322f; border-radius: 14px 14px 0 0; overflow: hidden; }
+  #snav { position: absolute; left: 0; top: 0; bottom: 0; width: 250px; border-right: 1px solid #2c2b29; padding: 14px 12px; }
+  #snav .search { border: 1px solid #3b3a37; border-radius: 10px; padding: 8px 12px; color: #8d8a83; font-size: 14.5px; margin-bottom: 14px; background: #262523; }
+  #snav .sh { padding: 14px 10px 6px; }
+  .sn { padding: 7px 10px; border-radius: 8px; color: #d0cdc6; font-size: 14.5px; display: flex; gap: 10px; align-items: center; }
   .sn.on { background: #2f2e2b; color: #fff; }
-  #spane { position: absolute; left: 330px; top: 70px; width: 820px; }
-  #spane h2 { font: 600 20px Inter; margin-bottom: 6px; } #spane p { color: #a29f97; font-size: 14.5px; }
-  .empty { margin-top: 26px; border: 1px dashed #43413d; border-radius: 14px; padding: 34px; text-align: center; color: #8d8a83; }
-  .btn { display: inline-block; padding: 9px 16px; border-radius: 9px; background: #ecebe6; color: #1a1918; font-weight: 600; font-size: 14px; }
-  .btn.dark { background: #33322f; color: #ecebe6; border: 1px solid #47453f; }
-  .srv-row { margin-top: 26px; border: 1px solid #3a3936; border-radius: 14px; padding: 16px 18px; display: flex; align-items: center; gap: 14px; }
-  .dot { width: 9px; height: 9px; border-radius: 5px; background: #4cc26a; }
+  .sn i { font-style: normal; width: 18px; text-align: center; opacity: .75; font-size: 14px; }
+  #spane { position: absolute; left: 282px; top: 44px; right: 26px; }
+  #spane h2 { font: 600 18px Inter; margin-bottom: 6px; } #spane p { color: #a29f97; font-size: 14.5px; }
+  #sclose { position: absolute; right: 18px; top: 14px; font-size: 18px; color: #bbb; }
+  .btn2 { display: inline-block; margin-top: 22px; padding: 8px 14px; border-radius: 9px; background: #33322f; color: #ecebe6; font-size: 14.5px; border: 1px solid #3f3e3a; }
+  #dev-row { margin-top: 22px; border: 1px solid #33322f; border-radius: 12px; display: flex; min-height: 300px; }
+  #dev-row .list { width: 220px; padding: 8px; border-right: 1px solid #2c2b29; } #dev-row .list div { background: #33322f; border-radius: 8px; padding: 9px 10px; font-size: 14.5px; }
+  #dev-row .det { flex: 1; padding: 16px 22px; font-size: 14.5px; } #dev-row .det b { font-weight: 600; }
+  #dev-row .k { margin-top: 16px; font-weight: 600; } #dev-row .v { color: #a29f97; font-family: 'JetBrains Mono', monospace; font-size: 13px; margin-top: 4px; word-break: break-all; }
+  .badge-run { display: inline-block; margin-left: 10px; padding: 2px 8px; border-radius: 6px; background: #1f3a26; color: #7fd08f; font-size: 13px; font-weight: 500; }
   /* menus */
   .menu { position: absolute; background: #2b2a28; border: 1px solid #403e3a; border-radius: 12px; padding: 6px; box-shadow: 0 18px 50px rgba(0,0,0,.5); font-size: 14.5px; }
   .mi { padding: 7px 12px; border-radius: 7px; display: flex; align-items: center; gap: 10px; color: #e2dfd8; white-space: nowrap; }
@@ -159,18 +164,24 @@
      <div id="comp"><div class="ph" id="ph">How can I help you today?</div><div class="tx" id="ctx"></div>
        <div class="row"><div class="cb" id="plus">＋</div><div class="cb" style="font-size:15px">⚲</div><div class="model">Opus 5.5<span>Medium</span></div><div id="send">↑</div></div></div>
    </div>
-   <div id="settings">
-     <div id="snav"><div class="t">Settings</div>
-       <div class="sn">General</div><div class="sn">Account</div><div class="sn">Privacy</div><div class="sn">Capabilities</div><div class="sn">Connectors</div>
-       <div class="sh">Desktop app</div><div class="sn">General</div><div class="sn">Extensions</div><div class="sn" id="sn-dev">Developer</div></div>
+   <div id="settings"><div id="smodal">
+     <div id="snav"><div class="search">⌕&nbsp; Search</div>
+       <div class="sh">Settings</div><div class="sn"><i>⚙</i>General</div><div class="sn"><i>◔</i>Privacy</div><div class="sn"><i>◷</i>Usage</div><div class="sn"><i>‹›</i>Claude Code</div><div class="sn"><i>☰</i>Cowork</div><div class="sn"><i>⇩</i>Import &amp; export</div>
+       <div class="sh">This computer</div><div class="sn"><i>▭</i>System</div><div class="sn" id="sn-dev"><i>⚒</i>Developer</div>
+       <div class="sh">Customize</div><div class="sn"><i>▤</i>Skills</div><div class="sn"><i>⊞</i>Connectors</div><div class="sn"><i>✦</i>Plugins</div></div>
+     <div id="sclose">✕</div>
      <div id="spane">
-       <div id="sp-gen"><h2>Profile</h2><p>Full name, how Claude should address you, and your work.</p>
-         <div class="empty" style="text-align:left;border-style:solid">Hao Nguyen · Software engineer</div></div>
-       <div id="sp-dev" style="position:absolute;left:0;top:0;width:820px"><h2>Local MCP servers</h2><p>Servers that run on this computer, configured in <span style="font-family:JetBrains Mono;color:#e0b6a5">claude_desktop_config.json</span>.</p>
-         <div class="empty" id="dev-empty">No servers added yet<br><br><br><span class="btn" id="editcfg">Edit Config</span></div>
-         <div class="srv-row" id="dev-row"><div class="dot"></div><div><b style="font-weight:600">refigma-mcp</b><div style="color:#8d8a83;font-size:13.5px">running · 9 tools</div></div><span class="btn dark" style="margin-left:auto">Edit Config</span></div></div>
+       <div id="sp-gen"><h2>General</h2><p>Appearance, language and how Claude starts.</p></div>
+       <div id="sp-dev" style="position:absolute;left:0;top:0;right:0"><h2>Local MCP servers</h2><p>Add and manage MCP servers that you're working on.</p>
+         <span class="btn2" id="editcfg">Edit config</span><div id="dev-empty"></div>
+         <div id="dev-row"><div class="list"><div>refigma-mcp</div></div>
+           <div class="det"><div style="font-size:17px"><b>refigma-mcp</b><span class="badge-run" id="running">Running</span></div>
+             <div class="k">Command</div><div class="v">npx</div>
+             <div class="k">Arguments</div><div class="v">-y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz</div>
+             <span class="btn2" id="viewlogs" style="margin-top:16px">View logs</span>
+             <div style="margin-top:14px;color:#cfccc5">›&nbsp; Advanced options</div></div></div></div>
      </div>
-   </div>
+   </div></div>
   </div>
 
   <div id="finder" class="win">
@@ -220,7 +231,7 @@
 
   <div id="dock"><div class="dk" style="background:#2c6ee8">◉</div><div class="dk" style="background:#3a3a40">▦</div><div class="dk" style="background:linear-gradient(#36b0f5,#1773d6)">◐</div><div class="dk" style="background:#1d1d1f;color:#9f9">&gt;_</div><div class="dk" id="dk-claude">✳<i id="dk-dot"></i></div><div class="dk" style="background:#eee;color:#333">✎</div></div>
 
-  <div class="mark" id="mk"><span></span></div>
+  <div class="mark" id="mk"><span></span></div><div class="mark" id="mk2"><span></span></div>
   <div class="key" id="key"></div>
   <div class="ripple" id="rip"></div>
   <svg id="cursor" viewBox="0 0 24 24"><path d="M3 2 L3 19 L7.6 14.9 L10.6 21.4 L13.6 20 L10.7 13.6 L17 13.4 Z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg>
@@ -250,7 +261,7 @@ const op = (el, o) => { el.style.opacity = o; el.style.visibility = o <= 0 ? 'hi
 
 // ---- content
 const ED0 = '{\n  "mcpServers": {\n', ED2 = '  }\n}\n';
-const ENTRY = '    "refigma-mcp": {\n      "command": "npx",\n      "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz"]\n    }\n';
+const ENTRY = '    "refigma-mcp": {\n      "command": "npx",\n      "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"]\n    }\n';
 const PROMPT = 'Turn this Figma frame into React + Tailwind: https://www.figma.com/design/7dkR8zP71qc5MtUFCPi7Hd/Social-Media-Analytics?node-id=2-977';
 const ANS = 'Done. I generated <b>SocialMediaAnalyticsDashboard.tsx</b> from the frame (1440 × 990): sidebar, profile card, stats, target rings and the photo gallery, with exact sizes and colors.';
 const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -258,7 +269,8 @@ const hl = s => esc(s).replace(/("[^"]*")(\s*:)/g, '<span class="k">$1</span>$2'
 
 // ---- positions (measured once, camera at identity)
 const P = (s, dx = 0, dy = 0) => { const r = $(s).getBoundingClientRect(); return [r.left + r.width / 2 + dx, r.top + r.height / 2 + dy]; };
-let T, CUR, CLICKS, CAM, CAPS, MARKS, KEYS;
+let T, CUR, CLICKS, CAM, CAPS, MARKS, KEYS, RUN;
+const AT = 29.4, D = 7.0;   // inserted step: Settings → Developer shows refigma-mcp Running
 function setup() {
   // place menus next to their triggers
   const comp = () => $('#comp').getBoundingClientRect();
@@ -287,16 +299,17 @@ function setup() {
   CAPS = [[3, 10.6, '1', 'Open Settings → Developer → Edit Config', 'Claude Desktop shows the config file in Finder'],
     [10.6, 23.4, '2', 'Add refigma-mcp under "mcpServers", then save', 'Copy the entry from the README; keep any servers already there'],
     [23.4, 29.4, '3', 'Quit Claude Desktop completely (⌘Q), then open it again', 'Closing the window is not enough: the config is read at startup'],
-    [29.4, 35.4, '4', 'Check it: ＋ → Connectors → refigma-mcp is on', 'Settings → Developer also lists it as running'],
-    [35.4, 41.2, '5', 'Paste a link to a Figma frame and ask', 'Right-click a frame in Figma → Copy link to selection'],
-    [41.2, 45.0, '6', 'First time only: allow the Keychain prompt', 'refigma reads your figma.com session from Edge, so no Figma token is needed'],
-    [45.0, 54.0, '7', 'Code comes back, checked pixel by pixel against Figma', 'figma_get_code → TSX / HTML, assets and tokens · figma_compare → match %']];
+    [29.4, 35.4, '5', 'Check it: ＋ → Connectors → refigma-mcp is on', '12 figma_* tools'],
+    [35.4, 41.2, '6', 'Paste a link to a Figma frame and ask', 'Right-click a frame in Figma → Copy link to selection'],
+    [41.2, 45.0, '7', 'First time only: allow the Keychain prompt', 'refigma reads your figma.com session from Edge, so no Figma token is needed'],
+    [45.0, 54.0, '8', 'Code comes back, checked pixel by pixel against Figma', 'figma_get_code → TSX / HTML, assets and tokens · figma_compare → match %']];
   const R = s => { const r = $(s).getBoundingClientRect(); return [r.left - 8, r.top - 8, r.width + 16, r.height + 16]; };
-  MARKS = [[8.5, 10.2, R('#editcfg'), 'Edit Config'], [19.8, 22.6, null, 'the release URL'], [32.4, 35.0, R('#mi-refigma'), '9 figma_* tools']];
+  RUN = { acct: P('#acct'), set: P('#mi-settings'), dev: P('#sn-dev'), run: P('#running'), logs: P('#viewlogs'), mkRun: R('#running'), mkLogs: R('#viewlogs') };
+  MARKS = [[8.5, 10.2, R('#editcfg'), 'Edit config', 'right'], [19.8, 22.6, null, 'the release URL'], [32.4, 35.0, R('#mi-refigma'), '12 figma_* tools']];
   KEYS = [[22.0, 23.0, '⌘ S', [880, 560]], [25.9, 26.9, '⌘ Q', [520, 300]]];
 }
 
-function render(t) {
+function renderBase(t) {
   // camera
   const [s, fx, fy] = kf(t, CAM);
   const cx = clamp(fx, 800 / s, 1600 - 800 / s), cy = clamp(fy, 500 / s, 1000 - 500 / s);
@@ -370,7 +383,8 @@ function render(t) {
     let r = m[2];
     if (!r) { const sp = [...$('#ed').querySelectorAll('.s')].find(e => e.textContent.includes('github.com')); if (sp) { const b = sp.getBoundingClientRect(), k = kf(t, CAM)[0];
       const cr = $('#cam').getBoundingClientRect(); r = [(b.left - cr.left) / k - 8, (b.top - cr.top) / k - 6, b.width / k + 16, b.height / k + 12]; } }
-    if (r) { Object.assign($('#mk').style, { left: r[0] + 'px', top: r[1] + 'px', width: r[2] + 'px', height: r[3] + 'px', opacity: vis(t, m[0], m[1]) }); $('#mk span').textContent = m[3]; }
+    if (r) { Object.assign($('#mk').style, { left: r[0] + 'px', top: r[1] + 'px', width: r[2] + 'px', height: r[3] + 'px', opacity: vis(t, m[0], m[1]) }); $('#mk span').textContent = m[3];
+      Object.assign($('#mk span').style, m[4] === 'right' ? { left: 'calc(100% + 10px)', top: '0px' } : { left: '-3px', top: '-34px' }); }
   } else $('#mk').style.opacity = 0;
   const k = KEYS.find(([a, b]) => t >= a && t < b);
   if (k) { Object.assign($('#key').style, { left: k[3][0] + 'px', top: k[3][1] + 'px', opacity: vis(t, k[0], k[1]) }); $('#key').textContent = k[2]; } else $('#key').style.opacity = 0;
@@ -383,6 +397,33 @@ function render(t) {
   op($('#end'), clamp((t - 54.0) / .5));
   op($('#cursor'), t > 2.8 && t < 54.2 ? 1 : 0);
 }
-window.ready = document.fonts.ready.then(() => { setup(); render(0); });
+
+// the "is it running?" step, inserted after the restart; the rest of the timeline is the base one shifted by D
+function render(t) {
+  if (t < AT) { renderBase(t); op($('#mk2'), 0); return; }
+  if (t >= AT + D) { renderBase(t - D); op($('#mk2'), 0); return; }
+  const lt = t - AT;
+  renderBase(AT - 0.001);
+  const W0 = [1, 800, 500];
+  const [s, fx, fy] = kf(lt, [[0, W0], [0.6, [1.6, 260, 760]], [1.8, [1.6, 260, 760]], [2.5, [1.4, 640, 330]], [6.6, [1.4, 640, 330]], [7, W0]]);
+  const cx = clamp(fx, 800 / s, 1600 - 800 / s), cy = clamp(fy, 500 / s, 1000 - 500 / s);
+  $('#cam').style.transform = `translate(${800 - cx * s}px, ${500 - cy * s}px) scale(${s})`;
+  const start = kf(AT, CUR);
+  const [x, y] = kf(lt, [[0, start], [0.8, RUN.acct], [1.0, RUN.acct], [1.6, RUN.set], [1.8, RUN.set], [2.5, RUN.dev], [2.8, RUN.dev], [3.7, RUN.run], [4.9, RUN.run], [5.4, RUN.logs], [7, RUN.logs]]);
+  Object.assign($('#cursor').style, { left: x - 4 + 'px', top: y - 3 + 'px' }); op($('#cursor'), 1);
+  const c = [1.0, 1.8, 2.8].filter(c => lt >= c && lt < c + .45).at(-1);
+  if (c !== undefined) { const p = (lt - c) / .45; Object.assign($('#rip').style, { left: x + 'px', top: y + 'px', opacity: 1 - p, transform: `scale(${.4 + p})` }); } else $('#rip').style.opacity = 0;
+  op($('#m-acct'), vis(lt, 1.05, 1.9, .12)); $('#mi-settings').classList.toggle('hl', lt > 1.5);
+  op($('#settings'), vis(lt, 1.95, 7.0, .25)); const dev = lt >= 2.85;
+  op($('#sp-gen'), dev ? 0 : 1); op($('#sp-dev'), dev ? 1 : 0); op($('#dev-empty'), 0); op($('#dev-row'), dev ? 1 : 0);
+  $('#sn-dev').classList.toggle('on', dev); $('#snav .sn').classList.toggle('on', !dev);
+  const mk = (id, r, label, a, b) => { Object.assign($(id).style, { left: r[0] + 'px', top: r[1] + 'px', width: r[2] + 'px', height: r[3] + 'px', opacity: vis(lt, a, b) });
+    Object.assign($(id + ' span').style, { left: 'calc(100% + 10px)', top: '0px' }); $(id + ' span').textContent = label; };
+  mk('#mk', RUN.mkRun, 'status', 3.9, 6.8); mk('#mk2', RUN.mkLogs, 'not running? View logs', 5.0, 6.8);
+  op($('#key'), 0);
+  op($('#cap'), vis(lt, .25, D - .1, .25));
+  $('#capn').textContent = '4'; $('#capt').textContent = 'Check it: Settings → Developer → refigma-mcp is Running'; $('#caps').textContent = 'Not running? View logs shows why';
+}
+window.ready = document.fonts.ready.then(() => { setup(); T += D; render(0); });
 </script>
 </body></html>

@@ -1,0 +1,14 @@
+[
+ "Here's how to set up re-figma M C P in Claude Desktop, on Windows.",
+ "First, open PowerShell, and install Node.js and Python with winget. Then open a new PowerShell, and check the versions: Node must be twenty-two point fifteen or newer.",
+ "In Claude Desktop, open Settings, then Developer, and click Edit Config.",
+ "This opens claude desktop config dot json. Right after the first curly brace, add the M C P servers block, and keep everything else as it is.",
+ "On Windows, the command is cmd, with slash c, then npx. Starting npx directly fails. Save with Control S.",
+ "Now quit Claude completely, from the tray icon, and open it again. Closing the window is not enough.",
+ "Once it is back, open Settings, then Developer. Re-figma M C P should show Running. If it doesn't, click View logs to see why.",
+ "In a new chat, open plus, then Connectors. Re-figma M C P is listed, and switched on.",
+ "Paste a link to a Figma frame, and ask Claude to read it.",
+ "The first time, Claude runs figma relogin, and an Edge window opens. Sign in to Figma there, within five minutes. After that, everything runs in the background.",
+ "Claude gets the layout tree, and can turn the frame into code.",
+ "New versions install themselves. Just quit and reopen Claude. Ask for figma status to see which version is running."
+]
