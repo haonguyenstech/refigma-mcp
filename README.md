@@ -115,6 +115,8 @@ refigma-mcp runs on your machine (stdio), so it is added through the config file
 4. In a new chat, open the **+** menu → **Connectors** (or the tools icon): `refigma-mcp` is listed with its
    `figma_*` tools. Paste a frame link and ask, as in the [Guide](#guide).
 
+New releases install themselves from then on; see [Updating in Claude Desktop](#updating-in-claude-desktop).
+
 **If it does not show up** — Claude Desktop starts the server without your shell's `PATH`, so it may not find
 `npx`, a recent enough Node, or the Python that has `cryptography`:
 
@@ -390,8 +392,62 @@ claude mcp remove refigma-mcp -s user
 claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz
 ```
 
-**Claude Desktop:** replace the URL in `args` of `claude_desktop_config.json` (or the connector's), then quit and
-reopen the app. Cached captures are re-generated automatically when a release changes the extractor.
+Cached captures are re-generated automatically when a release changes the extractor.
+
+### Updating in Claude Desktop
+
+**Which version is running?** In a chat, ask *"run figma_status"*. Its first line is the version, e.g.
+`refigma-mcp v0.6.0`, plus `(v0.7.0 is installed: restart the MCP server to use it)` when a newer release is waiting.
+
+**On v0.6.0 or newer — nothing to edit.** New releases download by themselves in the background; to start using one:
+
+1. **Quit** Claude Desktop completely (⌘Q on macOS; on Windows, quit from the tray icon) and open it again.
+   Closing the window does not restart the server.
+2. Ask *"run figma_status"* again: the first line shows the new version.
+
+To take a release right away instead of waiting for the next check (up to 6h), run this once in a terminal, then
+quit and reopen Claude Desktop:
+
+```bash
+# macOS / Linux — any installed copy's updater fetches the latest release
+node "$(find ~/.figma-local/app ~/.npm/_npx -path '*lib/update.mjs' 2>/dev/null | head -1)" --force
+tail -1 ~/.figma-local/app/update.log      # "installed 0.7.0 (was 0.6.0); used from the next start"
+```
+
+```powershell
+# Windows
+node (Get-ChildItem "$env:USERPROFILE\.figma-local\app", "$env:LOCALAPPDATA\npm-cache\_npx" -Recurse -Filter update.mjs -ErrorAction SilentlyContinue | Where-Object FullName -like '*lib\update.mjs' | Select-Object -First 1).FullName --force
+Get-Content "$env:USERPROFILE\.figma-local\app\update.log" -Tail 1
+```
+
+No new line in the log means you already run the latest release.
+
+**On v0.5.0 or older — change the URL once.** Those versions have no updater, and each release URL is cached by
+`npx`, so they never move on their own:
+
+1. **Settings → Developer → Edit Config** opens `claude_desktop_config.json`
+   (macOS `~/Library/Application Support/Claude/`, Windows `%APPDATA%\Claude\`).
+   With an organization gateway the app reads `Claude-3p/claude_desktop_config.json` in the same folder instead.
+2. In the `refigma-mcp` entry, set the release URL in `args`; keep `command` and `env` as they are:
+
+   ```json
+   "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz"]
+   ```
+
+3. Quit Claude Desktop completely and open it again, then check with *"run figma_status"*.
+   From here on, updates follow the steps above with no config change.
+
+A connector your organization manages (**Settings → Connectors**, marked *Managed*) is changed by its admin, not by you.
+
+**If the version does not change** although the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest) is newer — read `~/.figma-local/app/update.log` (written only when an install succeeds or fails):
+
+| Log line | Fix |
+| --- | --- |
+| no file, or no line about the new release | The server never ran an update check: `REFIGMA_AUTO_UPDATE` is `0` in `env`, or the server runs from a local checkout (`node …/server.mjs`), which never updates itself — use `git pull` there. |
+| `npm install: …` / `spawn npm ENOENT` | npm is not found next to the `node` Claude Desktop runs: put that folder first in `env.PATH` (see *If it does not show up* above). |
+| `releases/latest 403` | GitHub's API limit for your IP (60 requests/h); the next check retries. |
+
+**Roll back:** add `"REFIGMA_AUTO_UPDATE": "0"` to `env` and put the older release's URL in `args`, then restart.
 
 ---
 
