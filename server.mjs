@@ -22,6 +22,7 @@ const CACHE = path.join(os.homedir(), '.figma-local', 'out');
 const ENV = { ...process.env, ...PYTHON_ENV,
   PATH: IS_WIN ? process.env.PATH : `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
   NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-semi-space-size=64`.trim(),
+  REFIGMA_NODE: NODE,   // extract.py runs lib/images.mjs with it
   // node data comes from a recorded page document only while it is recent; older ones fall back to a live capture
   REFIGMA_DOC_MAX_AGE: process.env.REFIGMA_DOC_MAX_AGE || '1800' };
 
@@ -110,14 +111,20 @@ async function extractFromMsg(t) {
   packMsg(t.dir);
 }
 
-// Data for a node, fastest source first. Both give the same code (byte-identical HTML/tree on the test frames):
+// Data for a node, fastest source first. All give the same code (byte-identical HTML/tree on the test frames):
 //   1. the page document recorded by a recent capture (no browser, ~3-5s) — only if it is younger than
 //      REFIGMA_DOC_MAX_AGE and every image of the node resolved; otherwise
-//   2. a live editor capture: Figma's copy data + its PNG (~25-35s; the only source of frame.png, so `png` forces it).
-// REFIGMA_PROTO=1 adds the prototype viewer between them (just the frame, ~10-25s; experimental: images the browser
-// already cached are not seen, and those nodes fall back to 2). REFIGMA_SOURCE=clipboard always uses 2.
+//   2. a newly recorded page document (~12-15s on a 150k-node page): the editor is not waited for, image URLs come
+//      from image/batch (lib/images.mjs); else
+//   3. a live editor capture: Figma's copy data + its PNG (~25-35s; the only source of frame.png, so `png` forces it).
+//      The copy waits ~10-15s for Figma's main thread after the document has arrived, hence 2 first.
+// REFIGMA_PROTO=1 tries the prototype viewer after 2 (just the frame, ~10-25s; experimental: images the browser
+// already cached are not seen, and those nodes fall back to 3). REFIGMA_SOURCE=clipboard always uses 3.
+// args: the doc.mjs command that writes msg.json (none when recordDoc already did)
 const fromDoc = async (t, args) => {
-  await run(NODE, [LIB('doc.mjs'), ...args]);
+  // Figma's PNG and copy data left by an older live capture would pass for this one (capturedAt = msg.json)
+  for (const f of ['frame.png', 'clip.html']) fs.rmSync(path.join(t.dir, f), { force: true });
+  if (args) await run(NODE, [LIB('doc.mjs'), ...args]);
   await extractFromMsg(t);
   const missing = JSON.parse(read(t, 'extract.json')).images_missing || [];
   if (missing.length) throw new Error(`images not resolved: ${missing.join(', ')}`);
@@ -132,9 +139,23 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
   if (!opts.png && process.env.REFIGMA_SOURCE !== 'clipboard') {
     fs.mkdirSync(t.dir, { recursive: true });
     const msg = path.join(t.dir, 'msg.json');
+    let imagesFailed = false;
     if (!refresh && hasDoc(t.fdir)) {
       try { await fromDoc(t, ['extract', t.fdir, t.node, msg, t.file]); return { ...t, cached: false, source: 'document' }; }
-      catch { /* not on a recent recorded page, or an image without URL */ }
+      catch (e) { imagesFailed = /images not resolved/.test(e.message); /* else not on a recent recorded page */ }
+    }
+    if (!imagesFailed) {   // a new recording would not resolve those images either
+      try {
+        await recordDoc(t, msg);
+        await fromDoc(t);
+        return { ...t, cached: false, source: 'new document' };
+      } catch (e) {
+        if (/NOT_LOGGED_IN|NO_ACCESS|NOT_FOUND/.test(e.message)) throw e;
+        // Figma opens the page of the node-id; a plain node missing from it does not exist (a layer inside an instance,
+        // I…;…, is never in the document: the copy may still find it)
+        if (/is not on the recorded page/.test(e.message) && !t.node.startsWith('I'))
+          throw new Error(`NODE_NOT_FOUND: node ${t.node} is not in this file (deleted, or a link from another file) — list frames with figma_get_metadata`);
+      }
     }
     if (process.env.REFIGMA_PROTO === '1') {
       try {
@@ -143,7 +164,7 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
         await run(NODE, [LIB('capture.mjs'), t.protoUrl, pdir], 90_000);
         await fromDoc(t, ['extract-dir', pdir, t.node, msg, t.file]);
         return { ...t, cached: false, source: 'prototype' };
-      } catch (e) { if (/NOT_LOGGED_IN/.test(e.message)) throw e; }
+      } catch (e) { if (/NOT_LOGGED_IN|NO_ACCESS|NOT_FOUND/.test(e.message)) throw e; }
     }
     for (const f of MSG_FILES) fs.rmSync(path.join(t.dir, f), { force: true });
   }
@@ -153,18 +174,38 @@ const capture = (url, refresh, opts = {}) => serial(async () => {
   return { ...t, cached: false, source: 'clipboard' };
 });
 
+// record the page of t's node (document only: no copy, no PNG) and index it; with msg, also extract t's node into it
+// from the same decode. Callers hold the queue.
+async function recordDoc(t, msg) {
+  await run(NODE, [LIB('capture.mjs'), t.nodeUrl, path.join(t.fdir, '_doc', '_new')]);
+  await run(NODE, [LIB('doc.mjs'), 'ingest', t.fdir, ...(msg ? [t.node, msg, t.file] : [])]);
+}
 const ensureDoc = (url, refresh) => serial(async () => {
   const t = parseUrl(url);
-  if (refresh || !hasDoc(t.fdir)) {
-    await run(NODE, [LIB('capture.mjs'), t.nodeUrl, path.join(t.fdir, '_doc', '_new')]);
-    await run(NODE, [LIB('doc.mjs'), 'ingest', t.fdir]);
-  }
+  if (refresh || !hasDoc(t.fdir)) await recordDoc(t);
   return t;
 });
 
 const read = (r, f) => fs.readFileSync(path.join(r.dir, f), 'utf8');
 const text = s => ({ content: [{ type: 'text', text: s }] });
 const fail = e => ({ isError: true, content: [{ type: 'text', text: String(e.message || e) }] });
+// Answers stay within what a chat model can take in (Claude Code caps a tool result at ~25k tokens; a component sheet
+// gives 3.6M characters of code): over the budget they are cut at a line and say how to ask for smaller parts.
+const MAX_CHARS = +(process.env.REFIGMA_MAX_CHARS || 80_000);
+const MAX_CHARS_ARG = z.number().int().positive().optional().describe(`Character budget of the answer (default ${MAX_CHARS})`);
+function fit(s, max, more) {
+  if (s.length <= max) return s;
+  const cut = s.lastIndexOf('\n', max);
+  return `${s.slice(0, cut > max / 2 ? cut : max)}\n… truncated at ${max} of ${s.length} characters${more ? `\n${more}` : ''}`;
+}
+// the node's direct children as ids to ask for instead of a too large node
+function childList(r, limit = 40) {
+  try {
+    const kids = JSON.parse(read(r, 'model.json')).children || [];
+    const rows = kids.slice(0, limit).map(c => `  ${c.id}  ${c.type.toLowerCase()} "${c.name}" ${Math.round(c.w)}x${Math.round(c.h)}`);
+    return kids.length ? `Request a child instead (node_id):\n${rows.join('\n')}${kids.length > limit ? `\n  … ${kids.length - limit} more (figma_get_metadata)` : ''}` : '';
+  } catch { return ''; }
+}
 const URL_ARG = z.string().describe('figma.com/design/... link (with ?node-id= for node tools)');
 const NODE_ARG = z.string().optional().describe('Node id like "3685:53706" — overrides the node-id in the link');
 const REFRESH = z.boolean().optional().describe('Re-capture instead of using the cache (use after the design changed)');
@@ -180,8 +221,8 @@ server.registerTool('figma_get_metadata', {
   title: 'Outline of a Figma file / node',
   description: 'Without a node: lists every page of the file and the sections/frames of the recorded page(s) as sparse XML (id, name, type, x, y, width, height). With a node: the outline under it to `depth`. Use it to discover frame ids, then call the other tools with node_id. Pages load lazily in Figma: to outline another page, pass a link whose node-id is on that page with refresh=true.',
   inputSchema: { url: URL_ARG, node_id: NODE_ARG, depth: z.number().int().positive().optional(), refresh: REFRESH,
-    max_lines: z.number().int().positive().optional().describe('Truncate (default 1000 lines)') },
-}, async ({ url, node_id, depth, refresh, max_lines = 1000 }) => {
+    max_lines: z.number().int().positive().optional().describe('Truncate (default 1000 lines)'), max_chars: MAX_CHARS_ARG },
+}, async ({ url, node_id, depth, refresh, max_lines = 1000, max_chars = MAX_CHARS }) => {
   try {
     let t = await ensureDoc(url, refresh);
     // the link's node-id is the default root; pages are listed unless a node_id was asked for explicitly
@@ -197,7 +238,7 @@ server.registerTool('figma_get_metadata', {
     }
     const lines = outline.split('\n');
     const body = lines.slice(0, max_lines).join('\n') + (lines.length > max_lines ? `\n… truncated (${lines.length} lines total): pass a deeper node_id or a smaller depth` : '');
-    return text(`${pages ? `<pages>\n${pages}</pages>\n\n` : ''}${body}`);
+    return text(fit(`${pages ? `<pages>\n${pages}</pages>\n\n` : ''}${body}`, max_chars, 'pass a deeper node_id or a smaller depth'));
   } catch (e) { return fail(e); }
 });
 
@@ -215,21 +256,21 @@ server.registerTool('figma_search', {
 server.registerTool('figma_get_node', {
   title: 'Read a Figma node as a layout tree',
   description: 'Compact layout tree: auto-layout (dir, gap, padding, justify/align, hug/fixed, fill-main/fill-cross, wrap, absolute), size/position/rotation, fills (solid #HEX(token), gradients, images), strokes (per side, align, dash), radius per corner, shadow/blur params, clip, typography (family, weight, size/line-height, letter-spacing, alignment, resize, mixed runs), text, style names (text/fill/effect styles), prototype interactions (on:click/hover → target, transition), hover variants, Dev Mode annotations. Instances are expanded with overrides, component properties, variant swaps and variable modes applied. Start here; use figma_get_code for exact code.',
-  inputSchema: { url: URL_ARG, node_id: NODE_ARG, refresh: REFRESH, max_lines: z.number().int().positive().optional().describe('Truncate (default 2000 lines)') },
-}, async ({ url, node_id, refresh, max_lines = 2000 }) => {
+  inputSchema: { url: URL_ARG, node_id: NODE_ARG, refresh: REFRESH, max_lines: z.number().int().positive().optional().describe('Truncate (default 2000 lines)'), max_chars: MAX_CHARS_ARG },
+}, async ({ url, node_id, refresh, max_lines = 2000, max_chars = MAX_CHARS }) => {
   try {
     const r = await capture(url, refresh, { node: node_id });
     const lines = read(r, 'tree.txt').split('\n');
-    const body = lines.slice(0, max_lines).join('\n') + (lines.length > max_lines ? `\n… truncated (${lines.length} lines total)` : '');
-    return text(`file=${r.file} node=${r.node} (${sourceNote(r)}) dir=${r.dir}\nlegend: WxH @x,y [dir gap pad=T R B L justify align size=main/cross] fill-main/fill-cross=stretch, colors #HEX(token), style{...}=Figma style names, on:event→action(target transition)\n\n${body}`);
+    const body = lines.slice(0, max_lines).join('\n') + (lines.length > max_lines ? `\n… truncated (${lines.length} lines total)\n${childList(r)}` : '');
+    return text(fit(`file=${r.file} node=${r.node} (${sourceNote(r)}) dir=${r.dir}\nlegend: WxH @x,y [dir gap pad=T R B L justify align size=main/cross] fill-main/fill-cross=stretch, colors #HEX(token), style{...}=Figma style names, on:event→action(target transition)\n\n${body}`, max_chars, childList(r)));
   } catch (e) { return fail(e); }
 });
 
 server.registerTool('figma_get_nodes', {
   title: 'Read several nodes at once',
   description: 'Layout trees for several node ids of the same file. Nodes on an already-recorded page are extracted from the page document in seconds (no browser round-trip); others are captured live.',
-  inputSchema: { url: URL_ARG, node_ids: z.array(z.string()).min(1), max_lines_each: z.number().int().positive().optional() },
-}, async ({ url, node_ids, max_lines_each = 400 }) => {
+  inputSchema: { url: URL_ARG, node_ids: z.array(z.string()).min(1), max_lines_each: z.number().int().positive().optional(), max_chars: MAX_CHARS_ARG },
+}, async ({ url, node_ids, max_lines_each = 400, max_chars = MAX_CHARS }) => {
   try {
     const errors = {}, source = {};
     const ids = [...new Set(node_ids.map(id => { try { return normNode(id); } catch (e) { errors[id] = e.message; return id; } }))];
@@ -256,7 +297,8 @@ server.registerTool('figma_get_nodes', {
         if (errors[id]) throw new Error(errors[id]);
         const r = source[id] ? { ...parseUrl(url, id), source: source[id] } : await capture(url, false, { node: id });
         const lines = read(r, 'tree.txt').split('\n');
-        parts.push(`### node ${r.node} (${sourceNote(r)})\n` + lines.slice(0, max_lines_each).join('\n') + (lines.length > max_lines_each ? `\n… truncated (${lines.length} lines)` : ''));
+        parts.push(fit(`### node ${r.node} (${sourceNote(r)})\n` + lines.slice(0, max_lines_each).join('\n') + (lines.length > max_lines_each ? `\n… truncated (${lines.length} lines)` : ''),
+          Math.floor(max_chars / ids.length), 'ask for this node alone (figma_get_node) or for fewer nodes'));
       } catch (e) { parts.push(`### node ${id}\nERROR: ${e.message}`); }
     }
     return text(parts.join('\n\n'));
@@ -266,13 +308,15 @@ server.registerTool('figma_get_nodes', {
 server.registerTool('figma_get_code', {
   title: 'Pixel-faithful code for a Figma node',
   description: 'Deterministic code generated straight from Figma data and verified against Figma\'s own render (~99.97% pixel match): format "html" = HTML + CSS (flexbox, exact px, outline strokes, shadows, gradients, inline SVG icons, token CSS variables, :hover rules + transitions from prototype hover variants, data-on-click targets); format "react" = a React component with Tailwind arbitrary values (same values; hover via group-hover). Translate it into the project\'s conventions rather than eyeballing the PNG.',
-  inputSchema: { url: URL_ARG, node_id: NODE_ARG, format: z.enum(['html', 'react']).optional(), refresh: REFRESH, path_only: z.boolean().optional() },
-}, async ({ url, node_id, format = 'html', refresh, path_only }) => {
+  inputSchema: { url: URL_ARG, node_id: NODE_ARG, format: z.enum(['html', 'react']).optional(), refresh: REFRESH, path_only: z.boolean().optional(), max_chars: MAX_CHARS_ARG },
+}, async ({ url, node_id, format = 'html', refresh, path_only, max_chars = MAX_CHARS }) => {
   try {
     const r = await capture(url, refresh, { node: node_id });
     const f = format === 'react' ? componentFile(r) : 'index.html';
     const p = path.join(r.dir, f);
-    return text(path_only ? p : `${p} (${sourceNote(r)})\n\n${read(r, f)}`);
+    // cut code is not usable as is: the answer says so and lists the children, whose code fits
+    return text(path_only ? p : fit(`${p} (${sourceNote(r)})\n\n${read(r, f)}`, max_chars,
+      `The code above is INCOMPLETE (whole file: ${p}). ${childList(r) || 'Ask for a smaller node.'}`));
   } catch (e) { return fail(e); }
 });
 
@@ -423,7 +467,13 @@ server.registerTool('figma_status', {
   });
   let browser = 'headless browser not running (starts automatically on the next capture)';
   try { const v = await (await fetch('http://127.0.0.1:9334/json/version')).json(); browser = `headless browser: ${v.Browser} on :9334`; } catch {}
-  return text(`${browser}\n${lines.join('\n') || 'no captures yet'}\nIf captures fail with NOT_LOGGED_IN, run figma_relogin.`);
+  let upd = '';
+  try {
+    const { installed, cmpVer } = await import('./lib/update.mjs');
+    const next = installed().find(v => cmpVer(v, version) > 0);
+    upd = next ? ` (v${next} is installed: restart the MCP server to use it)` : '';
+  } catch {}
+  return text(`refigma-mcp v${version}${upd}\n${browser}\n${lines.join('\n') || 'no captures yet'}\nIf captures fail with NOT_LOGGED_IN, run figma_relogin.`);
 });
 
 await server.connect(new StdioServerTransport());

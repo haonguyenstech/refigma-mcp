@@ -57,7 +57,7 @@ Deterministic HTML/CSS or a React component with Tailwind arbitrary values (incl
 `figma_compare` renders your running app, an HTML file or the generated React in an sRGB headless Edge and diffs it with Figma's own PNG: match %, the worst regions and a diff image. Generated HTML scores **99.07–99.98%** on 12 production frames, see [Fidelity](#fidelity).
 
 ### ⚡ Fast after the first call
-The first node of a page takes ~25–35s (mostly Figma loading the page). Every other node on that page then comes from the recorded document in ~3–5s, without a browser. See [Speed](#speed).
+The first node of a page takes ~15s (mostly Figma sending the page; ~6s on a small file). Every other node on that page then comes from the recorded document in ~3–5s, without a browser. Figma's own PNG (`figma_get_image`, `figma_compare`) still needs a full live capture, ~25–35s. See [Speed](#speed).
 
 ### 🛡️ Quiet and safe
 A private headless Edge, no window, no Figma Desktop popping up; several agent sessions at once; design content treated as untrusted input. See [Reliability and safety](#reliability-and-safety).
@@ -74,7 +74,7 @@ A private headless Edge, no window, no Figma Desktop popping up; several agent s
 ### Install
 
 ```bash
-claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz
 ```
 
 The package is the `.tgz` attached to each [GitHub release](https://github.com/haonguyenstech/refigma-mcp/releases):
@@ -82,7 +82,7 @@ The package is the `.tgz` attached to each [GitHub release](https://github.com/h
 the same command:
 
 ```json
-{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz"] } } }
+{ "mcpServers": { "refigma-mcp": { "command": "npx", "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz"] } } }
 ```
 
 For a global install instead: `npm install -g <the .tgz URL>`, then use `refigma-mcp` as the command.
@@ -102,7 +102,7 @@ refigma-mcp runs on your machine (stdio), so it is added through the config file
      "mcpServers": {
        "refigma-mcp": {
          "command": "npx",
-         "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz"],
+         "args": ["-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz"],
          "env": { "FIGMA_API_KEY": "figd_… (optional, see Configuration)" }
        }
      }
@@ -162,7 +162,7 @@ A typical agent run calls `figma_get_node` for the layout tree, `figma_get_asset
 `figma-read` writes the same outputs as the server:
 
 ```bash
-npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz figma-read "<figma link>" [out dir]
+npx -p https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz figma-read "<figma link>" [out dir]
 ```
 
 <p align="center"><img src=".github/assets/figma-read.png" width="860" alt="figma-read on a Figma link: OK, 85 nodes, 9 icons, component SendFee.tsx"></p>
@@ -248,12 +248,14 @@ flowchart LR
     B -- yes --> OUT
     B -- no --> C{page recorded in<br/>the last 30 min?}
     C -- yes --> D[page document<br/>no browser, ~3-5s]
-    C -- no --> E[live capture<br/>headless Edge, ~25-35s]
+    C -- no --> R[record the page<br/>headless Edge, ~15s]
+    R --> G[multiplayer socket<br/>whole page, ~150k nodes]
+    G --> D
+    C -. PNG needed .-> E[live capture<br/>~25-35s]
     E --> F[Figma's copy handler<br/>fig-kiwi + PNG]
-    E --> G[multiplayer socket<br/>whole page, ~150k nodes]
-    G -. recorded for next time .-> D
     F --> X[extract.py]
     D --> X
+    X -. image URLs .-> I[image/batch<br/>~0.3s]
     X --> OUT[tree.txt · index.html · Component.tsx<br/>assets/ · tokens.json · frame.png]
 ```
 
@@ -283,8 +285,25 @@ Generated HTML compared with Figma's PNG, on 12 frames of two production files:
 | Notification popover | 97.1% | **99.07%** |
 | The other 8 | 98.9–99.98% | **99.07–99.98%** |
 
-React + Tailwind renders pixel-identical to the HTML on the frames checked. The remaining difference is mostly
-text anti-aliasing and font metrics.
+And on public files anyone can open (frame links from GitHub READMEs), before and after the fixes of v0.6:
+
+| Frame | Before | Now |
+| --- | ---: | ---: |
+| [Bitcoin UI Kit](https://www.figma.com/design/VB3GQdAnhl8yta44DY3PSV/Bitcoin-UI-Kit) · Send - recipient (`26-708`) | 79.0% | **99.49%** |
+| Bitcoin UI Kit · Home (`5629-16191`) | 90.8% | **99.54%** |
+| Bitcoin UI Kit · Transactions (`1904-499`) | 93.1% | **98.58%** |
+| Bitcoin UI Kit · Send - fee (`26-1292`) | 95.0% | **98.91%** |
+| Bitcoin UI Kit · `1903-54056` | 99.3% | **99.67%** |
+| [DashPay Android](https://www.figma.com/design/84tUBQA9DYU1svyQx8tnbk/DashPay---Android) · Welcome (`30036-6698`) | 69.3% | **99.59%** |
+| [WallGodds](https://www.figma.com/design/rsOU06uLMMhLJOgw7SUhWt/Wallgodds) · Sign In, mobile (`3547-517`) | 84.7% | **99.31%** |
+| [DGA components](https://www.figma.com/design/I2E5M7OWeToi3moSfwoRfH/Components-Library---Platforms-Code--Community-) · Button sheet (`407-510376`, 6.8k layers) | 99.34% | **99.86%** |
+| [IMDb Redesign](https://www.figma.com/design/1sIRD12ImqTbC6lI396gWA/IMDb-Redesign) · Reviews (`51-781`) | 99.79% | **99.79%** |
+| [Social Media Analytics Dashboard](https://www.figma.com/design/7dkR8zP71qc5MtUFCPi7Hd) · Dashboard (`2-977`) | 93.1% | **98.70%** |
+| [BizRank UI](https://www.figma.com/design/UGugSfQCkplaBzaCzS6MC7/BizRank-UI) · login, Japanese (`1220-103`) | 99.89% | **99.89%** |
+
+React + Tailwind renders pixel-identical to the HTML on all of these. The remaining difference is mostly text
+anti-aliasing and font metrics, plus fonts Google Fonts does not have (WallGodds uses a local font) or serves without
+an OpenType feature the design turns on (Inter's slashed zero).
 
 <details>
 <summary><b>What makes it faithful</b></summary>
@@ -295,6 +314,11 @@ text anti-aliasing and font metrics.
 - **Styles win over cached paints:** library shadow, image fill and text style references resolve to the style's
   current values, for every node, across several override entries of one node, and in text runs. Figma's copy
   handler skips them inside overrides, so this fixes clipboard output too.
+- **Masks, crops, aligned strokes:** mask layers (flagged `mask` in newer files) clip their siblings by outline, alpha
+  or luminance; cropped images keep the crop; inside/outside strokes of icons stay inside/outside; a frame's stroke
+  paints over absolutely positioned children; layer blur and drop shadows apply to icons too.
+- **Absent fields mean the default:** a missing right/bottom padding is 0, not the left/top value (checked on 155
+  hugging frames); a vector loop may start with a reversed segment.
 - **Variables:** bound colours resolve through alias chains in the active mode (a paint's cached colour can be stale).
   Figma mirrors a bound colour's alpha into the paint opacity; it is applied once. A token painted in another mode
   inside the frame keeps its own colour.
@@ -320,11 +344,12 @@ Measured on a 154k-node file with a View seat:
 | --- | --- |
 | Anything captured in the last 12h | instant (cache) |
 | Node on a page recorded in the last 30 min, incl. `figma_get_nodes` batches | ~3-5s, no browser |
-| First node of a page, or an older recording (live capture) | ~25-35s, mostly Figma: ~10s to send the page, ~11s to load it |
+| First node of a page, or an older recording | ~15s (~6s on a small file): ~10s for Figma to send the page, then decoded locally |
+| `figma_get_image` / `figma_compare` without a PNG yet (live capture) | ~25-35s: the copy waits ~13s more for Figma to load the page |
 | `figma_get_metadata` / `figma_search` on a new page | ~12s |
 | `figma_compare` | ~4s; ~15s for a 3442×1740 frame at 2x |
 
-A recorded document is only used when every image of the node has a URL; otherwise the node is captured live.
+Image URLs come from Figma's own `image/batch` endpoint with the browser session (no token, no quota); a node whose images still cannot be resolved is captured live.
 
 ---
 
@@ -344,26 +369,29 @@ A recorded document is only used when every image of the node has a URL; otherwi
 
 ## Updating
 
-Each release has its own URL, so an install stays on its version until you switch it — nothing changes under you.
+**Automatic since v0.6.0** — nothing to change in the MCP config. At each start the server checks the
+[latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest) in the background (at most every 6h),
+installs it into `~/.figma-local/app/<version>/`, and runs it from the **next** start: restart Claude Desktop, or
+`/mcp` → `refigma-mcp` → **Reconnect** in Claude Code. `figma_status` shows the running version and a downloaded one
+waiting for a restart; `~/.figma-local/app/update.log` records each install.
 
-**Which version do I run?** The version is in the URL:
+| Variable | Effect |
+| --- | --- |
+| `REFIGMA_AUTO_UPDATE=0` | Off: run exactly the version in the config URL. |
+| `REFIGMA_UPDATE_EVERY` | Seconds between checks (default `21600`). |
 
-```bash
-claude mcp get refigma-mcp      # Args: -y https://github.com/…/releases/download/v0.5.0/refigma-mcp-0.5.0.tgz
-```
+Check now: `node ~/.figma-local/app/<version>/lib/update.mjs --force` (or the `lib/update.mjs` of your install).
+Roll back: set `REFIGMA_AUTO_UPDATE=0` and an older release's URL, or delete the newer folder under `~/.figma-local/app/`.
 
-**Update** — take the URL of the [latest release](https://github.com/haonguyenstech/refigma-mcp/releases/latest)
-(its release notes have the full command) and add the server again:
+**From v0.5.0 or older** (no updater yet): switch the URL once, then updates are automatic.
 
 ```bash
 claude mcp remove refigma-mcp -s user
-claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/vX.Y.Z/refigma-mcp-X.Y.Z.tgz
+claude mcp add -s user refigma-mcp -- npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.0/refigma-mcp-0.6.0.tgz
 ```
 
-Then restart Claude Code, or run `/mcp` → `refigma-mcp` → **Reconnect** in an open session. Cached captures are
-re-generated automatically when a release changes the extractor; to roll back, add the older release's URL.
-
-**Claude Desktop:** replace the URL in `args` of `claude_desktop_config.json`, then quit and reopen the app.
+**Claude Desktop:** replace the URL in `args` of `claude_desktop_config.json` (or the connector's), then quit and
+reopen the app. Cached captures are re-generated automatically when a release changes the extractor.
 
 ---
 
@@ -382,7 +410,7 @@ re-generated automatically when a release changes the extractor; to roll back, a
 | `REFIGMA_EDGE_PROFILE` | `~/Library/Application Support/Microsoft Edge/Default` | macOS: profile the figma.com session is copied from. |
 | `REFIGMA_PYTHON` | `python3`; Windows: `python`, then `py -3` | Python 3 interpreter. |
 | `REFIGMA_LOGIN_TIMEOUT` | `300` | Windows: seconds `figma_relogin` waits for the sign-in. |
-| `FIGMA_API_KEY` / `FIGMA_ACCESS_TOKEN` | — | Fallback for images whose URL was never seen (REST image-fills, Tier 2 quota; cached per file for 12h). |
+| `FIGMA_API_KEY` / `FIGMA_ACCESS_TOKEN` | — | Last fallback for images `image/batch` did not resolve (REST image-fills, Tier 2 quota; cached per file for 12h). Rarely needed. |
 | `REFIGMA_TRACE=1` | — | Timing trace of a capture on stderr. |
 
 **Cache** — `~/.figma-local/out/<file key>/`:
@@ -431,13 +459,15 @@ Run-to-run render noise is about ±0.001%. Accept a change only when no frame ge
 A release is a git tag plus the packed `.tgz` attached to its GitHub release — no npm account involved:
 
 ```bash
-npm version 0.5.0 --no-git-tag-version          # bump package.json (the server reports this version)
-git commit -am "v0.5.0" && git push
-npm pack                                         # → refigma-mcp-0.5.0.tgz (15 files)
-gh release create v0.5.0 refigma-mcp-0.5.0.tgz --title "v0.5.0" --notes "…"
+npm version 0.6.0 --no-git-tag-version          # bump package.json (the server reports this version)
+git commit -am "v0.6.0" && git push
+npm pack                                         # → refigma-mcp-0.6.0.tgz
+gh release create v0.6.0 refigma-mcp-0.6.0.tgz --title "v0.6.0" --notes "…"
 ```
 
-Put the install command with the new URL in the release notes, then update the URLs in this README.
+Installs from v0.6.0 on pick the release up by themselves (`lib/update.mjs` reads `releases/latest` and needs the
+`refigma-mcp-*.tgz` asset). Put the install command with the new URL in the release notes for new users and those
+on v0.5.0 or older, then update the URLs in this README.
 
 ---
 
@@ -447,7 +477,7 @@ Put the install command with the new URL in the release notes, then update the U
 - Figma loads pages lazily: `figma_search` covers the pages recorded so far; `figma_get_metadata` records a node's
   page on demand.
 - Not rendered yet: grid auto layout (children keep their absolute positions), angular / diamond gradients inside SVG
-  icons, image fill opacity / crop / tile scale, corner smoothing (plain radius), vector masks in HTML (their box),
+  icons, corner smoothing (plain radius), vector masks in HTML (their box),
   boolean EXCLUDE (drawn like UNION). FigJam is started (`figjam_svg`) but not verified.
 - Fonts missing from Google Fonts fall back to the browser's.
 - A frame is static: no responsive behaviour; sizes are exact px, with hug / fill recorded in the tree.

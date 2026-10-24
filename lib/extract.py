@@ -25,7 +25,8 @@ for v in kids.values(): v.sort(key=lambda c: c['parentIndex']['position'])
 STYLE_PROPS = {'styleIdForFill': ['fillPaints'], 'styleIdForStrokeFill': ['strokePaints'], 'styleIdForEffect': ['effects'],
                'styleIdForText': ['fontName', 'fontSize', 'lineHeight', 'letterSpacing', 'paragraphSpacing', 'paragraphIndent',
                                   'textCase', 'textDecoration', 'fontVariations', 'fontVariantCommonLigatures',
-                                  'fontVariantContextualLigatures', 'textTracking', 'leadingTrim', 'fontVersion']}
+                                  'fontVariantContextualLigatures', 'textTracking', 'leadingTrim', 'fontVersion',
+                                  'toggledOnOTFeatures', 'toggledOffOTFeatures']}
 STYLES_BY_KEY = {}
 for n in N:
     if n.get('styleType') and n.get('key'): STYLES_BY_KEY.setdefault(n['key'], []).append(n)
@@ -190,8 +191,20 @@ def paint(p, w, h):
         return {'type': kind, 'stops': stops, 'c': (cx * w, cy * h), 'r': (rx, ry),
                 'css': f"radial-gradient({rx:.1f}px {ry:.1f}px at {cx * 100:.2f}% {cy * 100:.2f}%, {css})"}
     if t == 'IMAGE':
-        hsh = (p.get('image') or {}).get('hash')
-        return {'type': 'image', 'hash': hsh, 'scale': p.get('imageScaleMode', 'FILL'), 'opacity': op}
+        # some files (e.g. community copies) carry only the thumbnail; its hash resolves the same way
+        hsh = (p.get('image') or {}).get('hash') or (p.get('imageThumbnail') or {}).get('hash')
+        mode = p.get('imageScaleMode', 'FILL')
+        d = {'type': 'image', 'hash': hsh, 'scale': mode, 'opacity': op}
+        tf = p.get('transform') or {}
+        # Crop (STRETCH + transform): the node shows image region uv = T * (x/w, y/h); axis-aligned crops become a
+        # background box (rotated ones keep 100% 100%)
+        if mode == 'STRETCH' and tf.get('m00') and tf.get('m11') and abs(tf.get('m01', 0)) < 1e-6 and abs(tf.get('m10', 0)) < 1e-6 \
+                and (abs(tf['m00'] - 1) > 1e-4 or abs(tf['m11'] - 1) > 1e-4 or abs(tf.get('m02', 0)) > 1e-4 or abs(tf.get('m12', 0)) > 1e-4):
+            d['box'] = (w / tf['m00'], h / tf['m11'], -tf.get('m02', 0) / tf['m00'] * w, -tf.get('m12', 0) / tf['m11'] * h)
+            d['uv'] = (-tf.get('m02', 0) / tf['m00'], -tf.get('m12', 0) / tf['m11'], 1 / tf['m00'], 1 / tf['m11'])   # in the box's units
+        if mode == 'TILE' and p.get('scale') and p.get('originalImageWidth'):
+            d['tile'] = (p['originalImageWidth'] * p['scale'], p['originalImageHeight'] * p['scale'])
+        return d
     return {'type': t.lower()}
 
 def paints(ps, w, h): return [x for x in (paint(p, w, h) for p in ps or []) if x]
@@ -283,7 +296,9 @@ def resolve(n, ov=None, pv=None):
     ov = ov or {}
     n = dict(n)
     if n.get('type') == 'INSTANCE':
-        sym_id = g(n['overriddenSymbolID']) if n.get('overriddenSymbolID') else g((n.get('symbolData') or {}).get('symbolID') or n['guid'])
+        swapped = n.get('overriddenSymbolID')
+        if swapped and swapped.get('sessionID') == 4294967295: swapped = None   # null guid = no swap (page documents)
+        sym_id = g(swapped) if swapped else g((n.get('symbolData') or {}).get('symbolID') or n['guid'])
         sym = ensure_styles(byid.get(sym_id, {}))
         n['_component'] = sym.get('name')
         inner = ovmap((n.get('symbolData') or {}).get('symbolOverrides'))
@@ -353,10 +368,14 @@ def vector_paths(n):
         return f'C{f(x0 + tax)} {f(y0 + tay)} {f(x1 + tbx)} {f(y1 + tby)} {f(x1)} {f(y1)}'
     def chain(idx):
         d, cur = [], None
-        for i in idx:
+        idx = list(idx)
+        for k, i in enumerate(idx):
             a, b = S[i][0], S[i][3]
             rev = False
             if cur is not None and cur != a and cur == b: rev = True
+            # a loop's first segment may be stored end-to-start: it then meets the next segment with its start
+            if cur is None and k + 1 < len(idx) and b not in (S[idx[k + 1]][0], S[idx[k + 1]][3]) and a in (S[idx[k + 1]][0], S[idx[k + 1]][3]):
+                rev = True
             start = b if rev else a
             if cur != start: d.append(f'M{f(V[start][0])} {f(V[start][1])}')
             d.append(seg_cmd(S[i], rev)); cur = a if rev else b
@@ -467,6 +486,18 @@ ICONS, IMAGES = {}, set()
 
 def safe_family(f): return re.sub(r'''[^\w .+-]''', '', f) if f else f
 
+def ot_features(o, inherit=None):
+    """CSS font-feature-settings tags from Figma's OpenType toggles (e.g. ZERO -> 'zero' 1), or None."""
+    on = o.get('toggledOnOTFeatures'); off = o.get('toggledOffOTFeatures')
+    tags = dict(inherit or {})
+    if on is not None or off is not None:
+        tags = {k: v for k, v in tags.items() if k not in ('liga', 'calt')} if inherit is None else tags
+        for t in on or []: tags[t.lower()[:4]] = 1
+        for t in off or []: tags[t.lower()[:4]] = 0
+    if o.get('fontVariantCommonLigatures') is False: tags['liga'] = 0
+    if o.get('fontVariantContextualLigatures') is False: tags['calt'] = 0
+    return tags or None
+
 def text_model(n):
     td = n.get('textData') or {}
     chars = td.get('characters', '')
@@ -475,7 +506,7 @@ def text_model(n):
             'italic': 'italic' in (fn.get('style') or '').lower(), 'size': n.get('fontSize', 12),
             'lineHeight': n.get('lineHeight'), 'letterSpacing': n.get('letterSpacing'),
             'decoration': n.get('textDecoration'), 'case': n.get('textCase'),
-            'fills': paints(n.get('fillPaints'), 1, 1)}
+            'fills': paints(n.get('fillPaints'), 1, 1), 'features': ot_features(n)}
     runs = [{'text': chars, **base}]
     ids, table = td.get('characterStyleIDs'), {s['styleID']: s for s in td.get('styleOverrideTable') or n.get('styleOverrideTable') or [] if 'styleID' in s}
     if ids and table:
@@ -490,6 +521,8 @@ def text_model(n):
                     for k_src, k_dst in (('fontSize', 'size'), ('lineHeight', 'lineHeight'), ('letterSpacing', 'letterSpacing'), ('textDecoration', 'decoration'), ('textCase', 'case')):
                         if k_src in o: st[k_dst] = o[k_src]
                     if 'fillPaints' in o: st['fills'] = paints(o['fillPaints'], 1, 1)
+                    if any(k in o for k in ('toggledOnOTFeatures', 'toggledOffOTFeatures', 'fontVariantCommonLigatures', 'fontVariantContextualLigatures')):
+                        st['features'] = ot_features(o, base['features'] or {})
                     runs.append({'text': chars[start:i], **st})
                 cur, start = sid, i
     return {'characters': chars, 'runs': runs, 'alignH': n.get('textAlignHorizontal', 'LEFT'), 'alignV': n.get('textAlignVertical', 'TOP'),
@@ -510,14 +543,17 @@ def _model(n, parent_layout=None):
     mx = [tr.get('m00', 1), tr.get('m10', 0), tr.get('m01', 0), tr.get('m11', 1)]   # CSS matrix(a, b, c, d) order
     if max(abs(v - i) for v, i in zip(mx, (1, 0, 0, 1))) > 1e-6: m['matrix'] = [round(v, 6) for v in mx]   # rotation and/or flip
     if n.get('_component'): m['component'] = n['_component']
-    if n.get('isMask'): m['mask'] = n.get('maskType') or 'ALPHA'   # clips the siblings above it, is not painted itself
+    # clips the siblings above it, is not painted itself (newer files flag it as `mask`, older ones `isMask`)
+    if n.get('isMask') or n.get('mask') is True: m['mask'] = n.get('maskType') or 'ALPHA'
     if n.get('opacity', 1) < 0.999: m['opacity'] = n['opacity']
     if n.get('blendMode') not in (None, 'NORMAL', 'PASS_THROUGH'):   # CSS has no linear-burn / linear-dodge
         m['blend'] = {'LINEAR_BURN': 'multiply', 'LINEAR_DODGE': 'plus-lighter'}.get(n['blendMode'], n['blendMode'].lower().replace('_', '-'))
     if n.get('stackMode') in ('HORIZONTAL', 'VERTICAL'):
+        # left/top; right and bottom have their own fields, and an absent one is 0 (kiwi drops defaults), not the
+        # left/top value: measured on 155 hugging frames, the real end padding was 0 every time
         hp = n.get('stackHorizontalPadding', 0); vp = n.get('stackVerticalPadding', 0)
         m['layout'] = {'dir': 'row' if n['stackMode'] == 'HORIZONTAL' else 'col', 'gap': n.get('stackSpacing', 0),
-                       'pad': [vp, n.get('stackPaddingRight', hp), n.get('stackPaddingBottom', vp), hp],
+                       'pad': [vp, n.get('stackPaddingRight', 0), n.get('stackPaddingBottom', 0), hp],
                        'justify': n.get('stackPrimaryAlignItems', 'MIN'), 'align': n.get('stackCounterAlignItems', 'MIN'),
                        'wrap': n.get('stackWrap') == 'WRAP', 'counterGap': n.get('stackCounterSpacing'),
                        'primarySizing': n.get('stackPrimarySizing', 'FIXED'), 'counterSizing': n.get('stackCounterSizing', 'FIXED'),
@@ -536,7 +572,7 @@ def _model(n, parent_layout=None):
     strokes = paints(n.get('strokePaints'), w, h)
     if fills and t != 'TEXT': m['fills'] = fills
     if strokes and n.get('strokeWeight', 0) > 0 and t != 'TEXT':
-        st = {'paints': strokes, 'weight': n.get('strokeWeight', 1), 'align': n.get('strokeAlign', 'INSIDE'),
+        st = {'paints': strokes, 'weight': n.get('strokeWeight', 1), 'align': n.get('strokeAlign', 'CENTER'),
               'cap': n.get('strokeCap'), 'join': n.get('strokeJoin'), 'dash': n.get('dashPattern')}
         if n.get('borderStrokeWeightsIndependent'):
             st['sides'] = [n.get('borderTopWeight', 0), n.get('borderRightWeight', 0), n.get('borderBottomWeight', 0), n.get('borderLeftWeight', 0)]
@@ -596,7 +632,7 @@ def walk_all(m):
 # ---------------------------------------------------------------- SVG
 fmt = lambda v: f'{v:.3f}'.rstrip('0').rstrip('.') if isinstance(v, float) else str(v)
 
-def svg_paint(ps, defs=None):
+def svg_paint(ps, defs=None, box=None):
     for p in reversed(ps or []):  # topmost paint
         if p['type'] == 'solid': return p['color']
         if defs is not None and p['type'] in ('linear', 'radial') and p.get('stops'):
@@ -609,6 +645,20 @@ def svg_paint(ps, defs=None):
                 (cx, cy), (rx, ry) = p['c'], p['r']
                 defs.append(f'<radialGradient id="{gid}" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="translate({fmt(cx)} {fmt(cy)}) scale({fmt(rx)} {fmt(ry)})">{stops}</radialGradient>')
             return f'url(#{gid})'
+        if defs is not None and p['type'] == 'image' and p.get('hash'):
+            # image fill: a pattern over the shape's box; __IMG__ is the images folder, relative to where the SVG ends up
+            pid = f'__ID__p{len(defs)}'
+            x, y, w_, h_ = p.get('uv') or (0, 0, 1, 1)
+            par = 'none' if p.get('uv') or p['scale'] == 'STRETCH' else {'FIT': 'xMidYMid meet'}.get(p['scale'], 'xMidYMid slice')
+            op = f' opacity="{fmt(p["opacity"])}"' if p.get('opacity', 1) < 1 else ''
+            if box and par != 'none':   # cover/contain must see the shape's real aspect, not a 1x1 unit box
+                bw, bh = box
+                defs.append(f'<pattern id="{pid}" patternUnits="userSpaceOnUse" width="{fmt(bw)}" height="{fmt(bh)}"><image href="__IMG__/{p["hash"]}.png" '
+                            f'width="{fmt(bw)}" height="{fmt(bh)}" preserveAspectRatio="{par}"{op}/></pattern>')
+            else:
+                defs.append(f'<pattern id="{pid}" patternContentUnits="objectBoundingBox" width="1" height="1"><image href="__IMG__/{p["hash"]}.png" '
+                            f'x="{fmt(x)}" y="{fmt(y)}" width="{fmt(w_)}" height="{fmt(h_)}" preserveAspectRatio="{par}"{op}/></pattern>')
+            return f'url(#{pid})'
     return 'none'
 
 def arc_path(a, w, h):
@@ -620,9 +670,10 @@ def arc_path(a, w, h):
     ring = lambda k: f'M{pt(0, k)}A{fmt(rx * k)} {fmt(ry * k)} 0 1 1 {pt(math.pi, k)}A{fmt(rx * k)} {fmt(ry * k)} 0 1 1 {pt(0, k)}Z'
     if abs(sweep) >= 2 * math.pi - 1e-4: return ring(1) + (ring(ir) if ir else '')
     large = 1 if abs(sweep) > math.pi else 0
-    outer = f'M{pt(s0, 1)}A{fmt(rx)} {fmt(ry)} 0 {large} 1 {pt(s1, 1)}'
+    cw = 1 if sweep > 0 else 0   # endingAngle < startingAngle sweeps counter-clockwise
+    outer = f'M{pt(s0, 1)}A{fmt(rx)} {fmt(ry)} 0 {large} {cw} {pt(s1, 1)}'
     if not ir: return f'{outer}L{fmt(cx)} {fmt(cy)}Z'
-    return f'{outer}L{pt(s1, ir)}A{fmt(rx * ir)} {fmt(ry * ir)} 0 {large} 0 {pt(s0, ir)}Z'
+    return f'{outer}L{pt(s1, ir)}A{fmt(rx * ir)} {fmt(ry * ir)} 0 {large} {1 - cw} {pt(s0, ir)}Z'
 
 def rounded_rect_path(w, h, r):
     tl, tr_, br, bl = (min(v, w / 2, h / 2) for v in r)
@@ -634,20 +685,58 @@ def svg_children(children, defs):
     i = next((k for k, c in enumerate(children) if c.get('mask')), None)
     if i is None: return ''.join(svg_node(c, defs) for c in children)
     mk = children[i]; mid = f'__ID__m{len(defs)}'
-    shape = re.sub(r'\s(fill|stroke)="(?!none")[^"]*"', r' \1="#fff"', svg_node({**mk, 'mask': None}, defs))
-    defs.append(f'<clipPath id="{mid}">{shape}</clipPath>' if mk['mask'] == 'OUTLINE' else f'<mask id="{mid}" maskUnits="userSpaceOnUse">{shape}</mask>')
+    # OUTLINE (vector mask): the shape alone; ALPHA: the mask's own paints, by their alpha; LUMINANCE: by brightness
+    shape = svg_node({**mk, 'mask': None}, defs)
+    if mk['mask'] == 'OUTLINE': defs.append(f'<clipPath id="{mid}">{shape}</clipPath>')
+    else:
+        kind = ' mask-type="alpha" style="mask-type:alpha"' if mk['mask'] != 'LUMINANCE' else ''
+        defs.append(f'<mask id="{mid}" maskUnits="userSpaceOnUse"{kind}>{shape}</mask>')
     attr = 'clip-path' if mk['mask'] == 'OUTLINE' else 'mask'
     return ''.join(svg_node(c, defs) for c in children[:i]) + f'<g {attr}="url(#{mid})">{svg_children(children[i + 1:], defs)}</g>'
 
+def svg_geometry(m):
+    """A closed shape in its own coordinates: {'fill': fill -> markup, 'stroke': stroke attrs -> markup, 'clip': markup},
+    or None (lines, open paths, groups: their strokes stay centred)."""
+    t = m['type']; w, h = m['w'], m['h']
+    if t == 'VECTOR':
+        paths = m.get('paths') or []
+        if not paths or not m.get('strokePath'): return None
+        return {'fill': lambda f: ''.join(f'<path d="{p["d"]}" fill="{f}" fill-rule="{p["rule"]}"/>' for p in paths),
+                'stroke': lambda sa: f'<path d="{m["strokePath"]}" fill="none"{sa}/>',
+                'clip': ''.join(f'<path d="{p["d"]}" clip-rule="{p["rule"]}"/>' for p in paths)}
+    if t == 'ELLIPSE' and not m.get('arc'):
+        el = lambda f, sa='': f'<ellipse cx="{fmt(w / 2)}" cy="{fmt(h / 2)}" rx="{fmt(w / 2)}" ry="{fmt(h / 2)}" fill="{f}"{sa}/>'
+    elif t in ('RECTANGLE', 'ROUNDED_RECTANGLE'):
+        rr = m.get('radius') or [0] * 4
+        el = ((lambda f, sa='': f'<path d="{rounded_rect_path(w, h, rr)}" fill="{f}"{sa}/>') if len(set(rr)) > 1
+              else (lambda f, sa='': f'<rect width="{fmt(w)}" height="{fmt(h)}" rx="{fmt(rr[0])}" fill="{f}"{sa}/>'))
+    else: return None
+    return {'fill': el, 'stroke': lambda sa: el('none', sa), 'clip': el('#000')}
+
 def svg_node(m, defs, top=False):
     """SVG markup for a vector-ish node, in its parent's coordinate space."""
+    out = svg_shape(m, defs, top)
+    fx = [e for e in m.get('effects', []) if e['type'] in ('drop', 'blur')]
+    if top or not fx or not out: return out   # the root's effects become CSS filters on the icon
+    # layer blur / drop shadow inside an icon (e.g. a blurred photo copy as a glow): an SVG filter, sized to fit it
+    sig = max([e['radius'] / 2 for e in fx if e['type'] == 'blur'] + [e['blur'] / 2 + max(abs(e['x']), abs(e['y'])) for e in fx if e['type'] == 'drop'])
+    kx, ky = 3 * sig / max(m['w'], 1), 3 * sig / max(m['h'], 1)
+    fid = f'__ID__f{len(defs)}'
+    prims = ''.join(f'<feDropShadow dx="{fmt(e["x"])}" dy="{fmt(e["y"])}" stdDeviation="{fmt(e["blur"] / 2)}" flood-color="{e["color"]}"/>'
+                    for e in fx if e['type'] == 'drop')
+    prims += ''.join(f'<feGaussianBlur stdDeviation="{fmt(e["radius"] / 2)}"/>' for e in fx if e['type'] == 'blur')
+    defs.append(f'<filter id="{fid}" x="{fmt(-kx)}" y="{fmt(-ky)}" width="{fmt(1 + 2 * kx)}" height="{fmt(1 + 2 * ky)}" '
+                f'color-interpolation-filters="sRGB">{prims}</filter>')
+    return f'<g filter="url(#{fid})">{out}</g>'
+
+def svg_shape(m, defs, top=False):
     if top: tf = ''
     else:
         tf = (f' transform="matrix({" ".join(fmt(v) for v in m["matrix"])} {fmt(m["x"])} {fmt(m["y"])})"' if m.get('matrix')
               else f' transform="translate({fmt(m["x"])} {fmt(m["y"])})"')
     op = f' opacity="{fmt(m["opacity"])}"' if m.get('opacity') is not None else ''
     t = m['type']; w, h = m['w'], m['h']
-    fill = svg_paint(m.get('fills'), defs); st = m.get('stroke')
+    fill = svg_paint(m.get('fills'), defs, (w, h)); st = m.get('stroke')
     sattr = ''
     if st:
         sw = st['weight']
@@ -657,6 +746,19 @@ def svg_node(m, defs, top=False):
         if st.get('dash'): sattr += f' stroke-dasharray="{" ".join(fmt(x) for x in st["dash"])}"'
     if m.get('figjam') is not None:
         return f'<g{tf}{op}>{m["figjam"]}</g>'
+    geom = svg_geometry(m)
+    if st and st['align'] in ('INSIDE', 'OUTSIDE') and geom and st['weight']:
+        # SVG strokes are centred: draw the stroke twice as wide and keep the half inside (clip to the shape) or outside
+        # (mask out the shape), as Figma aligns it
+        cid = f'__ID__s{len(defs)}'
+        wide = sattr.replace(f' stroke-width="{fmt(st["weight"])}"', f' stroke-width="{fmt(st["weight"] * 2)}"')
+        if st['align'] == 'INSIDE':
+            defs.append(f'<clipPath id="{cid}">{geom["clip"]}</clipPath>'); lim = f'clip-path="url(#{cid})"'
+        else:
+            defs.append(f'<mask id="{cid}" maskUnits="userSpaceOnUse"><rect x="-1e4" y="-1e4" width="2e4" height="2e4" fill="#fff"/>'
+                        f'<g fill="#000">{geom["clip"]}</g></mask>'); lim = f'mask="url(#{cid})"'
+        body = (geom['fill'](fill) if fill != 'none' else '') + f'<g {lim}>{geom["stroke"](wide)}</g>'
+        return f'<g{tf}{op}>{body}</g>'
     if t == 'VECTOR':
         out = []
         for p in m.get('paths', []):
@@ -683,6 +785,8 @@ def svg_node(m, defs, top=False):
     if t == 'BOOLEAN_OPERATION' and m['boolean'] in ('SUBTRACT', 'INTERSECT') and len(m['children']) > 1:
         mid = f'__ID__b{len(defs)}'
         first = svg_node(m['children'][0], defs)
+        if fill != 'none':   # the result is painted with the boolean's own fill, not its operands'
+            first = re.sub(r'fill="(?!none")[^"]*"', f'fill="{fill}"', first)
         rest = ''.join(svg_node(c, defs) for c in m['children'][1:])
         if m['boolean'] == 'SUBTRACT':
             rest = re.sub(r'\s(fill|stroke)="(?!none")[^"]*"', r' \1="#000"', rest)
@@ -707,9 +811,10 @@ def icon_file(m):
     svg = svg_doc(m)
     name = re.sub(r'[^a-z0-9]+', '-', (m.get('component') or m['name']).lower()).strip('-') or 'icon'
     hsh = hashlib.sha1(svg.encode()).hexdigest()[:6]
-    fn = f'{name}.svg' if ICONS.get(f'{name}.svg', svg) == svg else f'{name}-{hsh}.svg'
-    ICONS[fn] = svg
-    return fn, svg
+    file_svg = svg.replace('__IMG__', '../images')   # as written to assets/icons/<fn>
+    fn = f'{name}.svg' if ICONS.get(f'{name}.svg', file_svg) == file_svg else f'{name}-{hsh}.svg'
+    ICONS[fn] = file_svg
+    return fn, svg.replace('__IMG__', 'assets/images')   # inlined in index.html, like the CSS background urls
 
 # ---------------------------------------------------------------- HTML / CSS
 CSS, HTML_FONTS = [], {}
@@ -728,8 +833,15 @@ def bg_css(fills):
     for p in reversed(fills):  # Figma: last paint is on top; CSS: first layer is on top
         if p['type'] == 'solid': layers.append(f"linear-gradient({color_css(p)}, {color_css(p)})")
         elif p['type'] == 'image':
-            size = {'FILL': 'cover', 'FIT': 'contain', 'TILE': 'auto', 'STRETCH': '100% 100%'}.get(p['scale'], 'cover')
-            layers.append(f"url(assets/images/{p['hash']}.png) center / {size} {'repeat' if p['scale'] == 'TILE' else 'no-repeat'}")
+            src = f"url(assets/images/{p['hash']}.png)"
+            if p.get('box'):
+                bw, bh, bx, by = p['box']
+                layers.append(f"{src} {fmt(bx)}px {fmt(by)}px / {fmt(bw)}px {fmt(bh)}px no-repeat")
+            elif p.get('tile'):
+                layers.append(f"{src} 0 0 / {fmt(p['tile'][0])}px {fmt(p['tile'][1])}px repeat")
+            else:
+                size = {'FILL': 'cover', 'FIT': 'contain', 'TILE': 'auto', 'STRETCH': '100% 100%'}.get(p['scale'], 'cover')
+                layers.append(f"{src} center / {size} {'repeat' if p['scale'] == 'TILE' else 'no-repeat'}")
         elif 'css' in p: layers.append(p['css'])
     if len(fills) == 1 and fills[0]['type'] == 'solid': return f"background: {color_css(fills[0])};"
     return f"background: {', '.join(layers)};" if layers else ''
@@ -755,6 +867,9 @@ def run_css(r, base=None):
     if ls and (not base or r['letterSpacing'] != base['letterSpacing']): out.append(f'letter-spacing: {ls}')
     if r.get('decoration') in ('UNDERLINE', 'STRIKETHROUGH') and (not base or r['decoration'] != base['decoration']):
         out.append('text-decoration: ' + ('underline' if r['decoration'] == 'UNDERLINE' else 'line-through'))
+    if r.get('features') != (base or {}).get('features') and (r.get('features') or base):
+        ft = r.get('features') or {}
+        out.append('font-feature-settings: ' + (', '.join(f"'{k}' {v}" for k, v in sorted(ft.items())) if ft else 'normal'))
     case = {'UPPER': 'uppercase', 'LOWER': 'lowercase', 'TITLE': 'capitalize'}.get(r.get('case'))
     if case and (not base or r['case'] != base['case']): out.append(f'text-transform: {case}')
     if r['fills'] and (not base or r['fills'] != base['fills']):
@@ -856,6 +971,10 @@ def build(m, parent=None):
     if m.get('icon') and m['type'] != 'TEXT':
         el['icon'], el['svg'] = icon_file(m)
         m['_icon'] = el['icon']
+        # the SVG carries geometry and paint only: the layer's drop shadows and blur go on its box
+        fx = [f"drop-shadow({fmt(e['x'])}px {fmt(e['y'])}px {fmt(e['blur'] / 2)}px {e['color']})" for e in m.get('effects', []) if e['type'] == 'drop']
+        fx += [f"blur({fmt(e['radius'] / 2)}px)" for e in m.get('effects', []) if e['type'] == 'blur']
+        if fx: css.append(f"filter: {' '.join(fx)}")
         return el
 
     if m.get('fills'): css.append(bg_css(m['fills']).rstrip(';'))
@@ -866,8 +985,16 @@ def build(m, parent=None):
         ts = [f"{fmt(e['x'])}px {fmt(e['y'])}px {fmt(e['blur'])}px {e['color']}" for e in m.get('effects', []) if e['type'] == 'drop']
         if ts: css.append('text-shadow: ' + ', '.join(ts))
     elif sh: css.append('box-shadow: ' + ', '.join(sh))
-    if id(m) in OUTLINE: css.extend(OUTLINE[id(m)].split('; '))
     el['after'] = SIDES.get(id(m))
+    if id(m) in OUTLINE:
+        kids = m.get('children') or []
+        if any((c.get('child') or {}).get('absolute') or c.get('_z') for c in kids) or ((m.get('layout') or {}).get('reverseZ') and kids):
+            # an outline paints above in-flow children only; positioned ones (absolute, z-indexed) would cover it, while
+            # Figma always draws a frame's stroke over its content: put it on an ::after layer, the last positioned box
+            z = len(kids) + 1 if (m.get('layout') or {}).get('reverseZ') else None
+            el['after'] = ["content: ''", 'position: absolute', 'inset: 0', 'border-radius: inherit', 'pointer-events: none',
+                           *OUTLINE[id(m)].split('; '), *([f'z-index: {z}'] if z else [])]
+        else: css.extend(OUTLINE[id(m)].split('; '))
     st = m.get('stroke')
     if st and st['paints'][-1]['type'] != 'solid' and 'css' in st['paints'][-1]:
         w_ = st['weight']; inset = {'INSIDE': 0, 'CENTER': -w_ / 2, 'OUTSIDE': -w_}.get(st['align'], 0)
@@ -924,12 +1051,36 @@ def build(m, parent=None):
 
 def mask_clip(mk, c):
     """CSS clip-path, in sibling c's own box, for the mask layer mk (both in their parent's coordinates)."""
+    if c.get('matrix') or mk.get('matrix'):
+        return mask_polygon(mk, c)
     l, t = mk['x'] - c['x'], mk['y'] - c['y']
     if mk['type'] == 'ELLIPSE':
         return f"ellipse({fmt(mk['w'] / 2)}px {fmt(mk['h'] / 2)}px at {fmt(l + mk['w'] / 2)}px {fmt(t + mk['h'] / 2)}px)"
     r = mk.get('radius') or [0]
     rnd = f" round {' '.join(f'{fmt(v)}px' for v in r)}" if any(r) else ''
     return f"inset({fmt(t)}px {fmt(c['w'] - l - mk['w'])}px {fmt(c['h'] - t - mk['h'])}px {fmt(l)}px{rnd})"
+
+def mask_polygon(mk, c):
+    """Rotated mask or sibling: clip-path lives in c's untransformed box, so trace the mask outline in the parent
+    and map it back through c's inverse matrix (an inset() there would rotate along with c)."""
+    w, h = mk['w'], mk['h']
+    if mk['type'] == 'ELLIPSE':
+        pts = [(w / 2 + w / 2 * math.cos(i * math.pi / 24), h / 2 + h / 2 * math.sin(i * math.pi / 24)) for i in range(48)]
+    else:
+        r = (mk.get('radius') or [0]) * 4
+        pts = []
+        for (cx, cy, a0), rad in zip(((w, 0, -90), (w, h, 0), (0, h, 90), (0, 0, 180)), (r[1], r[2], r[3], r[0])):
+            rad = min(rad, w / 2, h / 2)
+            sx, sy = (-1 if cx else 1), (-1 if cy else 1)
+            for k in range(7 if rad else 1):
+                t = math.radians(a0 + k * 15)
+                pts.append((cx + sx * rad + rad * math.cos(t), cy + sy * rad + rad * math.sin(t)))
+    a, b, cc, d = mk.get('matrix') or (1, 0, 0, 1)
+    pts = [(mk['x'] + a * x + cc * y, mk['y'] + b * x + d * y) for x, y in pts]
+    a, b, cc, d = c.get('matrix') or (1, 0, 0, 1)
+    det = a * d - b * cc or 1
+    loc = [((d * (x - c['x']) - cc * (y - c['y'])) / det, (-b * (x - c['x']) + a * (y - c['y'])) / det) for x, y in pts]
+    return 'polygon(' + ', '.join(f"{fmt(round(x, 2))}px {fmt(round(y, 2))}px" for x, y in loc) + ')'
 
 def hover_rules(root_el, base, hov):
     """Pair the default and hover variants node by node and emit paint changes as :hover rules."""
@@ -1023,6 +1174,10 @@ def tw(decls, variant=''):
 
 SVG_ATTR = re.compile(r'\s([a-z]+(?:-[a-z]+)+)=')
 def svg_jsx(svg):
+    # React takes style as an object, not a CSS string (a string style throws and drops the component)
+    camel = lambda k: re.sub(r'-([a-z])', lambda x: x.group(1).upper(), k.strip())
+    svg = re.sub(r' style="([^"]*)"', lambda mm: ' style={{' + ', '.join(f'{camel(k)}: {json.dumps(v.strip())}' for k, v in
+                 (d.split(':', 1) for d in mm.group(1).split(';') if ':' in d)) + '}}', svg)
     svg = SVG_ATTR.sub(lambda mm: ' ' + re.sub(r'-([a-z])', lambda x: x.group(1).upper(), mm.group(1)) + '=', svg)
     return svg.replace(' class=', ' className=')
 
@@ -1139,6 +1294,17 @@ def figma_image_url(u):
 # Images are content-addressed (hash): keep one copy per file so other frames of the file reuse it without a download.
 SHARED = os.path.join(os.path.expanduser('~/.figma-local/out'), META['fileKey'], '_images') if META.get('fileKey') else None
 todo = []
+# URLs the capture did not see (the page document is saved before Figma renders anything): ask the editor's own
+# endpoint for them, as the web app does, before the REST fallback below (token + per-minute quota)
+need = [h for h in sorted(IMAGES) if re.fullmatch(r'[0-9a-f]{40}', h) and not os.path.exists(f'{OUT}/assets/images/{h}.png')
+        and not (SHARED and os.path.exists(f'{SHARED}/{h}.png')) and not figma_image_url(urls.get(h))]
+if need and META.get('fileKey'):
+    try:
+        r = subprocess.run([os.environ.get('REFIGMA_NODE') or 'node', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images.mjs'), META['fileKey'], *need],
+                           capture_output=True, text=True, timeout=90)
+        if r.returncode == 0: urls.update(json.loads(r.stdout))
+        else: print(f'warning: {r.stderr.strip()[:200]}', file=sys.stderr)
+    except Exception as e: print(f'warning: image/batch: {e}', file=sys.stderr)
 for hsh in sorted(IMAGES):
     dst = f'{OUT}/assets/images/{hsh}.png'
     if os.path.exists(dst): continue
