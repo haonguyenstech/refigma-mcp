@@ -13,13 +13,13 @@
     "svg",
     "pixel-diff"
   ],
-  "homepage": "https://github.com/haonguyenstech/refigma-mcp#readme",
+  "homepage": "https://github.com/saigontechnology/refigma-mcp#readme",
   "bugs": {
-    "url": "https://github.com/haonguyenstech/refigma-mcp/issues"
+    "url": "https://github.com/saigontechnology/refigma-mcp/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/haonguyenstech/refigma-mcp.git"
+    "url": "git+https://github.com/saigontechnology/refigma-mcp.git"
   },
   "license": "MIT",
   "author": "Hao Nguyen",

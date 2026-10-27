@@ -186,7 +186,7 @@
           <div id="srvbox"><div class="list"><div>refigma-mcp</div></div>
             <div class="det"><div style="font-size:17px"><b>refigma-mcp</b><span class="badge-run" id="running">Running</span></div>
               <div class="k">Command</div><div class="v">cmd</div>
-              <div class="k">Arguments</div><div class="v">/c npx -y https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz</div>
+              <div class="k">Arguments</div><div class="v">/c npx -y https://github.com/saigontechnology/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz</div>
               <span class="btn2" id="viewlogs" style="margin-top:16px">View logs</span>
               <div style="margin-top:14px;color:#cfccc5">›&nbsp; Advanced options</div></div></div></div>
       </div>
@@ -255,7 +255,7 @@
  <div class="card" id="title"><div><h1>refigma-mcp <span>×</span> Claude Desktop</h1><p>Setup on Windows 10 / 11</p>
    <div class="chips"><div>Node.js 22.15+</div><div>Python 3</div><div>Microsoft Edge</div><div>Figma View seat</div></div></div></div>
  <div class="card" id="end"><div><h1>You're set <span>✳</span></h1><p>Updates install themselves. Quit and reopen Claude to use a new one.</p>
-   <div class="chips"><div><code>github.com/haonguyenstech/refigma-mcp</code></div></div>
+   <div class="chips"><div><code>github.com/saigontechnology/refigma-mcp</code></div></div>
    <p style="font-size:14px;color:#8f9bb8;margin-top:40px">Music: “Inspired” by Kevin MacLeod (incompetech.com) · CC BY 4.0</p></div></div>
 </div>
 
@@ -279,7 +279,7 @@ const blink = t => Math.floor(t * 2.2) % 2 === 0;
 
 const PS = 'PS C:\\Users\\you> ';
 const FILE0 = '{\n', FILE2 = '  "coworkUserFilesPath": "C:\\\\Users\\\\you\\\\Documents\\\\Claude",\n  "preferences": {\n    "sidebarMode": "chat"\n  }\n}\n';
-const BLOCK = '  "mcpServers": {\n    "refigma-mcp": {\n      "command": "cmd",\n      "args": ["/c", "npx", "-y", "https://github.com/haonguyenstech/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"]\n    }\n  },\n';
+const BLOCK = '  "mcpServers": {\n    "refigma-mcp": {\n      "command": "cmd",\n      "args": ["/c", "npx", "-y", "https://github.com/saigontechnology/refigma-mcp/releases/download/v0.6.2/refigma-mcp-0.6.2.tgz"]\n    }\n  },\n';
 const PROMPT1 = 'Read this Figma frame and give me the layout tree: https://www.figma.com/design/7dkR8zP71qc5MtUFCPi7Hd/Social-Media-Analytics?node-id=2-977';
 const P = (s, dx = 0, dy = 0) => { const r = $(s).getBoundingClientRect(); return [r.left + r.width / 2 + dx, r.top + r.height / 2 + dy]; };
 const R = (s, pad = 8) => { const r = $(s).getBoundingClientRect(); return [r.left - pad, r.top - pad, r.width + 2 * pad, r.height + 2 * pad]; };
